@@ -4,6 +4,11 @@ import { CreateRuleDto } from './dto/create-rule.dto';
 import { UpdateRuleDto } from './dto/update-rule.dto';
 import { QueryBuilderService } from 'src/common/rules/query-builder/query-builder.service';
 import { ConditionSpec } from 'src/common/rules/condition-types/condition.types';
+import { ActionSpec } from 'src/common/rules/action-types/action.types';
+import {
+  PROTECTED_LISTS,
+  PROTECTED_STATUSES,
+} from 'src/common/rules/rule-contants/rule-constants';
 @Injectable()
 export class RulesService {
   constructor(
@@ -139,6 +144,14 @@ export class RulesService {
     ruleId: number,
     apply: { batchSize: number; maxToUpdate: number },
   ) {
+    if (process.env.ALLOW_RULE_UPDATES !== 'true') {
+      return {
+        ok: false,
+        message:
+          'Updates are disabled in this environment. Set ALLOW_RULE_UPDATES=true to enable.',
+      };
+    }
+
     const rule = await this.findOne(ruleId);
 
     if (rule.is_active === 0) {
@@ -150,10 +163,15 @@ export class RulesService {
         ? JSON.parse(rule.conditions_json)
         : rule.conditions_json;
 
-    const actions =
+    const actions = (
       typeof rule.actions_json === 'string'
         ? JSON.parse(rule.actions_json)
-        : rule.actions_json;
+        : rule.actions_json
+    ) as ActionSpec;
+
+    const targetListId = actions.move_to_list;
+    const targetStatus = actions.update_status;
+    const resetCalled = actions.reset_called_since_last_reset === true;
 
     const conditionSpec = conditionsRaw as ConditionSpec;
 
@@ -162,9 +180,6 @@ export class RulesService {
       Math.max(apply.maxToUpdate ?? 10000, 1),
       50000,
     );
-
-    const targetListId = actions.move_to_list as number | undefined;
-    const targetStatus = actions.update_status as string | undefined;
 
     if (!targetListId && !targetStatus) {
       return {
@@ -212,7 +227,30 @@ export class RulesService {
 
     try {
       // Build WHERE from DSL
-      const { sql: whereSql , params } = this.qb.buildWhere(conditionSpec.where);
+      const { sql: baseWhereSql, params } = this.qb.buildWhere(
+        conditionSpec.where,
+      );
+      const protectedListClause =
+        PROTECTED_LISTS.length > 0
+          ? ` AND vicidial_list.list_id NOT IN (${PROTECTED_LISTS.map(() => '?').join(',')})`
+          : '';
+
+      const protectedStatusClause =
+        PROTECTED_STATUSES.length > 0
+          ? ` AND vicidial_list.status NOT IN (${PROTECTED_STATUSES.map(() => '?').join(',')})`
+          : '';
+
+      const whereSql = `
+  ${baseWhereSql}
+  ${protectedListClause}
+  ${protectedStatusClause}
+`;
+
+      const finalParams = [
+        ...params,
+        ...PROTECTED_LISTS,
+        ...PROTECTED_STATUSES,
+      ];
 
       // Count matches
       const [countRows] = await this.db.query(
@@ -225,23 +263,19 @@ export class RulesService {
 
       const toUpdate = Math.min(matchedCount, maxToUpdate);
       let updatedTotal = 0;
+      // Fetch a sample of leads BEFORE updating, for logging
+      const [sampleRows] = await this.db.query(
+        `SELECT lead_id, list_id, status, phone_number
+   FROM vicidial_list
+   ${whereSql}
+   ORDER BY lead_id
+   LIMIT 50`,
+        finalParams,
+      );
 
-      // Batch updates
       while (updatedTotal < toUpdate) {
         const remaining = toUpdate - updatedTotal;
         const currentBatch = Math.min(batchSize, remaining);
-
-        const [idRows] = await this.db.query(
-          `SELECT lead_id
-           FROM vicidial_list
-           ${whereSql}
-           ORDER BY lead_id
-           LIMIT ${currentBatch}`,
-          params,
-        );
-
-        const leadIds = (idRows as any[]).map((r) => r.lead_id);
-        if (leadIds.length === 0) break;
 
         const set: string[] = [];
         const updParams: any[] = [];
@@ -254,27 +288,34 @@ export class RulesService {
           set.push(`status = ?`);
           updParams.push(targetStatus);
         }
+
+        if (resetCalled) {
+          set.push(`called_since_last_reset = 'N'`); // see next section
+        }
+
         set.push(`modify_date = NOW()`);
 
-        const idPlaceholders = leadIds.map(() => '?').join(',');
-        updParams.push(...leadIds);
+        const sql = `
+    UPDATE vicidial_list
+    SET ${set.join(', ')}
+    ${whereSql}
+    LIMIT ${currentBatch}
+  `;
 
-        await this.db.query(
-          `UPDATE vicidial_list
-           SET ${set.join(', ')}
-           WHERE lead_id IN (${idPlaceholders})`,
-          updParams,
-        );
+        const [res] = await this.db.query(sql, [...updParams, ...finalParams]);
+        const affected = (res as any).affectedRows ?? 0;
+        if (affected === 0) break;
 
-        updatedTotal += leadIds.length;
+        updatedTotal += affected;
       }
 
       // Mark run as SUCCESS
       await this.db.query(
         `UPDATE lead_rule_runs
-         SET matched_count = ?, updated_count = ?, status = 'SUCCESS', ended_at = NOW()
-         WHERE id = ?`,
-        [matchedCount, updatedTotal, runId],
+   SET matched_count = ?, updated_count = ?, status = 'SUCCESS',
+       sample_json = ?, ended_at = NOW()
+   WHERE id = ?`,
+        [matchedCount, updatedTotal, JSON.stringify(sampleRows ?? []), runId],
       );
 
       return {

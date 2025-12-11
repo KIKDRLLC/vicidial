@@ -11,6 +11,10 @@ export class DryRunService {
   ) {}
 
   async preview(spec: ConditionSpec) {
+    if (!spec?.where) {
+      throw new Error('Dry-run requires a "where" condition group.');
+    }
+
     const sampleLimit = Math.min(
       Math.max(Number(spec.sampleLimit ?? 20), 1),
       100,
