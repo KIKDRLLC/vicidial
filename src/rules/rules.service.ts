@@ -46,15 +46,35 @@ export class RulesService {
   async findOne(id: number) {
     const [rows] = await this.db.query(
       `SELECT *
-       FROM lead_rules
-       WHERE id = ?`,
+     FROM lead_rules
+     WHERE id = ?`,
       [id],
     );
+
     const rule = (rows as any[])[0];
-    if (!rule) {
-      throw new NotFoundException('Rule not found');
-    }
-    return rule;
+    if (!rule) throw new NotFoundException('Rule not found');
+
+    // Normalize fields for frontend (DTO-friendly)
+    const conditions =
+      typeof rule.conditions_json === 'string'
+        ? JSON.parse(rule.conditions_json)
+        : rule.conditions_json;
+
+    const actions =
+      typeof rule.actions_json === 'string'
+        ? JSON.parse(rule.actions_json)
+        : rule.actions_json;
+
+    return {
+      id: rule.id,
+      name: rule.name,
+      description: rule.description,
+      is_active: rule.is_active,
+      created_at: rule.created_at,
+      updated_at: rule.updated_at,
+      conditions, // <-- object with { where, sampleLimit? }
+      actions, // <-- object with ActionSpec
+    };
   }
 
   async update(id: number, dto: UpdateRuleDto) {
@@ -65,14 +85,14 @@ export class RulesService {
     const isActive = dto.isActive ?? existing.is_active === 1;
 
     const existingConditions =
-      typeof existing.conditions_json === 'string'
-        ? JSON.parse(existing.conditions_json)
-        : existing.conditions_json;
+      typeof existing.conditions === 'string'
+        ? JSON.parse(existing.conditions)
+        : existing.conditions;
 
     const existingActions =
-      typeof existing.actions_json === 'string'
-        ? JSON.parse(existing.actions_json)
-        : existing.actions_json;
+      typeof existing.actions === 'string'
+        ? JSON.parse(existing.actions)
+        : existing.actions;
 
     const conditions = dto.conditions ?? existingConditions;
     const actions = dto.actions ?? existingActions;
@@ -159,14 +179,12 @@ export class RulesService {
     }
 
     const conditionsRaw =
-      typeof rule.conditions_json === 'string'
-        ? JSON.parse(rule.conditions_json)
-        : rule.conditions_json;
+      typeof rule.conditions === 'string'
+        ? JSON.parse(rule.conditions)
+        : rule.conditions;
 
     const actions = (
-      typeof rule.actions_json === 'string'
-        ? JSON.parse(rule.actions_json)
-        : rule.actions_json
+      typeof rule.actions === 'string' ? JSON.parse(rule.actions) : rule.actions
     ) as ActionSpec;
 
     const targetListId = actions.move_to_list;
