@@ -51,9 +51,9 @@ export class RulesController {
   async dryRun(@Param('id') id: string) {
     const rule = await this.rulesService.findOne(Number(id));
     const conditions =
-      typeof rule.conditions_json === 'string'
-        ? JSON.parse(rule.conditions_json)
-        : rule.conditions_json;
+      typeof rule.conditions === 'string'
+        ? JSON.parse(rule.conditions)
+        : rule.conditions;
 
     const result = await this.dryRunService.preview(conditions);
 
