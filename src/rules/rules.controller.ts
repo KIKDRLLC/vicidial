@@ -12,6 +12,7 @@ import { CreateRuleDto } from './dto/create-rule.dto';
 import { UpdateRuleDto } from './dto/update-rule.dto';
 import { DryRunService } from '../dry-run/dry-run.service';
 import { ApplyRuleDto } from './dto/apply-rule.dto';
+import { RescheduleRuleDto } from './dto/reschedule.dto';
 
 @Controller('rules')
 export class RulesController {
@@ -81,5 +82,23 @@ export class RulesController {
   @Get('runs/:runId')
   run(@Param('runId') runId: string) {
     return this.rulesService.getRun(Number(runId));
+  }
+
+  @Patch(':id/schedule')
+  schedule(@Param('id') id: string, @Body() dto: RescheduleRuleDto) {
+    return this.rulesService.update(Number(id), {
+      nextExecAt: dto.nextExecAt ?? null,
+    } as any);
+  }
+
+  @Post(':id/run-now')
+  async runNow(@Param('id') id: string) {
+    const ruleId = Number(id);
+    const rule = await this.rulesService.findOne(ruleId);
+
+    const batchSize = rule.apply_batch_size ?? 500;
+    const maxToUpdate = rule.apply_max_to_update ?? 10000;
+
+    return this.rulesService.applyRule(ruleId, { batchSize, maxToUpdate });
   }
 }

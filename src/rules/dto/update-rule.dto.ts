@@ -1,4 +1,14 @@
-import { IsBoolean, IsObject, IsOptional, IsString } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsBoolean,
+  IsDateString,
+  IsInt,
+  IsObject,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 
 export class UpdateRuleDto {
   @IsOptional()
@@ -20,4 +30,30 @@ export class UpdateRuleDto {
   @IsOptional()
   @IsObject()
   actions?: any;
+
+  // ---- Automation settings ----
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10080)
+  intervalMinutes?: number;
+
+  @IsOptional()
+  @IsDateString()
+  nextExecAt?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(5000)
+  applyBatchSize?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50000)
+  applyMaxToUpdate?: number;
 }

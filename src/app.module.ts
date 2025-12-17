@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { DatabaseModule } from './database/database.module';
-import { RulesModule } from './rules/rules.module';
-import { DryRunModule } from './dry-run/dry-run.module';
+import { ScheduleModule } from '@nestjs/schedule';
 import { QueryBuilderService } from './common/rules/query-builder/query-builder.service';
+import { DatabaseModule } from './database/database.module';
+import { DryRunModule } from './dry-run/dry-run.module';
+import { RulesModule } from './rules/rules.module';
 
 @Module({
   imports: [
@@ -11,6 +12,7 @@ import { QueryBuilderService } from './common/rules/query-builder/query-builder.
     DatabaseModule,
     RulesModule,
     DryRunModule,
+    ScheduleModule.forRoot(), // ✅ enables cron/interval/timeout decorators app-wide
   ],
   providers: [QueryBuilderService],
 })

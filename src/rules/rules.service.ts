@@ -19,15 +19,24 @@ export class RulesService {
   // ---------- CRUD ----------
 
   async create(dto: CreateRuleDto) {
+    const interval = dto.intervalMinutes ?? null;
+    const nextExecAt = dto.nextExecAt ? new Date(dto.nextExecAt) : null;
+
     const [res] = await this.db.query(
-      `INSERT INTO lead_rules (name, description, is_active, conditions_json, actions_json)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO lead_rules
+      (name, description, is_active, conditions_json, actions_json,
+       interval_minutes, next_exec_at, apply_batch_size, apply_max_to_update)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         dto.name,
         dto.description ?? null,
         (dto.isActive ?? true) ? 1 : 0,
         JSON.stringify(dto.conditions),
         JSON.stringify(dto.actions),
+        interval,
+        nextExecAt,
+        dto.applyBatchSize ?? null,
+        dto.applyMaxToUpdate ?? null,
       ],
     );
 
@@ -36,25 +45,23 @@ export class RulesService {
 
   async findAll() {
     const [rows] = await this.db.query(
-      `SELECT id, name, description, is_active, created_at, updated_at
-       FROM lead_rules
-       ORDER BY id DESC`,
+      `SELECT id, name, description, is_active, created_at, updated_at,
+            interval_minutes, next_exec_at, apply_batch_size, apply_max_to_update,
+            last_run_at
+     FROM lead_rules
+     ORDER BY id DESC`,
     );
     return rows;
   }
 
   async findOne(id: number) {
     const [rows] = await this.db.query(
-      `SELECT *
-     FROM lead_rules
-     WHERE id = ?`,
+      `SELECT * FROM lead_rules WHERE id = ?`,
       [id],
     );
-
     const rule = (rows as any[])[0];
     if (!rule) throw new NotFoundException('Rule not found');
 
-    // Normalize fields for frontend (DTO-friendly)
     const conditions =
       typeof rule.conditions_json === 'string'
         ? JSON.parse(rule.conditions_json)
@@ -72,8 +79,13 @@ export class RulesService {
       is_active: rule.is_active,
       created_at: rule.created_at,
       updated_at: rule.updated_at,
-      conditions, // <-- object with { where, sampleLimit? }
-      actions, // <-- object with ActionSpec
+      interval_minutes: rule.interval_minutes,
+      next_exec_at: rule.next_exec_at,
+      apply_batch_size: rule.apply_batch_size,
+      apply_max_to_update: rule.apply_max_to_update,
+      last_run_at: rule.last_run_at,
+      conditions,
+      actions,
     };
   }
 
@@ -84,29 +96,46 @@ export class RulesService {
     const description = dto.description ?? existing.description;
     const isActive = dto.isActive ?? existing.is_active === 1;
 
-    const existingConditions =
-      typeof existing.conditions === 'string'
-        ? JSON.parse(existing.conditions)
-        : existing.conditions;
+    const conditions = dto.conditions ?? existing.conditions;
+    const actions = dto.actions ?? existing.actions;
 
-    const existingActions =
-      typeof existing.actions === 'string'
-        ? JSON.parse(existing.actions)
-        : existing.actions;
+    const intervalMinutes =
+      dto.intervalMinutes !== undefined
+        ? dto.intervalMinutes
+        : existing.interval_minutes;
 
-    const conditions = dto.conditions ?? existingConditions;
-    const actions = dto.actions ?? existingActions;
+    const nextExecAt =
+      dto.nextExecAt !== undefined
+        ? dto.nextExecAt
+          ? new Date(dto.nextExecAt)
+          : null
+        : existing.next_exec_at;
+
+    const applyBatchSize =
+      dto.applyBatchSize !== undefined
+        ? dto.applyBatchSize
+        : existing.apply_batch_size;
+
+    const applyMaxToUpdate =
+      dto.applyMaxToUpdate !== undefined
+        ? dto.applyMaxToUpdate
+        : existing.apply_max_to_update;
 
     await this.db.query(
       `UPDATE lead_rules
-       SET name = ?, description = ?, is_active = ?, conditions_json = ?, actions_json = ?
-       WHERE id = ?`,
+     SET name=?, description=?, is_active=?, conditions_json=?, actions_json=?,
+         interval_minutes=?, next_exec_at=?, apply_batch_size=?, apply_max_to_update=?
+     WHERE id=?`,
       [
         name,
         description,
         isActive ? 1 : 0,
         JSON.stringify(conditions),
         JSON.stringify(actions),
+        intervalMinutes,
+        nextExecAt,
+        applyBatchSize,
+        applyMaxToUpdate,
         id,
       ],
     );
@@ -275,7 +304,7 @@ export class RulesService {
         `SELECT COUNT(*) AS c
          FROM vicidial_list
          ${whereSql}`,
-        params,
+        finalParams,
       );
       const matchedCount = (countRows as any)[0]?.c ?? 0;
 
