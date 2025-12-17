@@ -387,4 +387,38 @@ export class RulesService {
       throw e;
     }
   }
+
+  async listStatuses(campaignId?: string) {
+    if (campaignId && campaignId.trim()) {
+      const [rows] = await this.db.query(
+        `
+      SELECT DISTINCT status, status_name
+      FROM (
+        SELECT status, status_name
+        FROM vicidial_statuses
+        UNION ALL
+        SELECT status, status_name
+        FROM vicidial_campaign_statuses
+        WHERE campaign_id = ?
+      ) s
+      ORDER BY status
+      `,
+        [campaignId.trim()],
+      );
+      return rows;
+    }
+
+    const [rows] = await this.db.query(
+      `
+    SELECT DISTINCT status, status_name
+    FROM (
+      SELECT status, status_name FROM vicidial_statuses
+      UNION ALL
+      SELECT status, status_name FROM vicidial_campaign_statuses
+    ) s
+    ORDER BY status
+    `,
+    );
+    return rows;
+  }
 }

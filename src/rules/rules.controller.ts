@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { RulesService } from './rules.service';
 import { CreateRuleDto } from './dto/create-rule.dto';
@@ -100,5 +101,10 @@ export class RulesController {
     const maxToUpdate = rule.apply_max_to_update ?? 10000;
 
     return this.rulesService.applyRule(ruleId, { batchSize, maxToUpdate });
+  }
+
+  @Get('meta/statuses')
+  statuses(@Query('campaignId') campaignId?: string) {
+    return this.rulesService.listStatuses(campaignId);
   }
 }
