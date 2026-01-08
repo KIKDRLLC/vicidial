@@ -1,0 +1,412 @@
+Below is a **complete end-to-end setup guide** you can hand to someone to implement Advanced Rules from **DB → API → Vicidial UI → Automation runner**, matching what you’ve built (rules stored as JSON, dry-run + apply endpoints, dynamic lists/statuses, optional scheduling fields).
+
+---
+
+# 0) What you’re building (high level)
+
+**Goal:** Add a “Lead Automation Rules” screen in VICIdial that lets an admin:
+
+* Create rules with **FROM filters** (list/campaign/status/called counters/dates/phone contains, etc.)
+* Define **TO actions** (move list, update status, reset called_since_last_reset)
+* **Dry-run** to preview matched leads
+* **Apply** with safety rails
+* Optionally **schedule** rules to run automatically using interval + next execution time
+
+Architecture:
+
+* **DB:** `lead_rules` (rule definition + scheduling) and `lead_rule_runs` (history)
+* **NestJS service:** CRUD + dry-run + apply + metadata endpoints (lists/statuses/campaigns)
+* **Vicidial PHP UI:** `admin_advanced_rules.php` calls NestJS via `rules_proxy.php`
+* **Automation runner:** NestJS cron/interval worker that picks due rules and executes apply.
+
+---
+
+# 1) Database setup (MariaDB/MySQL)
+
+## 1.1 Create tables
+
+Run these in your VICIdial DB:
+
+### A) `lead_rules`
+
+Include scheduling columns (interval/next_exec/batch/max/etc.) + JSON columns.
+
+```sql
+CREATE TABLE IF NOT EXISTS `lead_rules` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) NOT NULL,
+  `description` text DEFAULT NULL,
+  `is_active` tinyint(1) NOT NULL DEFAULT 1,
+
+  `interval_minutes` int(11) DEFAULT NULL,
+  `next_exec_at` datetime DEFAULT NULL,
+  `apply_batch_size` int(11) DEFAULT NULL,
+  `apply_max_to_update` int(11) DEFAULT NULL,
+  `last_run_at` datetime DEFAULT NULL,
+  `locked_at` datetime DEFAULT NULL,
+  `locked_by` varchar(64) DEFAULT NULL,
+
+  `conditions_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`conditions_json`)),
+  `actions_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`actions_json`)),
+
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+
+  PRIMARY KEY (`id`),
+  KEY `idx_lead_rules_active` (`is_active`),
+  KEY `idx_lead_rules_locked` (`locked_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
+```
+
+### B) `lead_rule_runs`
+
+```sql
+CREATE TABLE IF NOT EXISTS `lead_rule_runs` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `rule_id` int(11) NOT NULL,
+
+  `run_type` enum('DRY_RUN','APPLY') NOT NULL,
+  `matched_count` int(11) DEFAULT NULL,
+  `updated_count` int(11) DEFAULT NULL,
+
+  `status` enum('STARTED','SUCCESS','FAILED') NOT NULL DEFAULT 'STARTED',
+  `error_text` text DEFAULT NULL,
+
+  `sample_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`sample_json`)),
+
+  `started_at` datetime DEFAULT NULL,
+  `ended_at` datetime DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+
+  PRIMARY KEY (`id`),
+  KEY `idx_runs_rule_id` (`rule_id`),
+  KEY `idx_runs_created_at` (`created_at`),
+  KEY `idx_runs_rule_type` (`rule_id`,`run_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
+```
+
+## 1.2 (Optional) indexes on `vicidial_list`
+
+Add only if you see slow queries:
+
+```sql
+CREATE INDEX idx_vl_list_status ON vicidial_list (list_id, status);
+CREATE INDEX idx_vl_entry_date ON vicidial_list (entry_date);
+CREATE INDEX idx_vl_last_call ON vicidial_list (last_local_call_time);
+CREATE INDEX idx_vl_called_count ON vicidial_list (called_count);
+CREATE INDEX idx_vl_called_since ON vicidial_list (called_since_last_reset);
+```
+
+---
+
+# 2) Backend setup (NestJS rules engine)
+
+## 2.1 Environment + DB connection
+
+* Backend must connect to the same MariaDB as VICIdial.
+* Use `mysql2/promise` pool.
+* Add `ALLOW_RULE_UPDATES=true` in environments where apply is allowed.
+
+Example env:
+
+* `DB_HOST`, `DB_USER`, `DB_PASS`, `DB_NAME`
+* `ALLOW_RULE_UPDATES=true|false`
+
+## 2.2 Implement/confirm these core endpoints
+
+### Rules CRUD
+
+* `POST /rules` → create
+* `GET /rules` → list
+* `GET /rules/:id` → fetch (return parsed `conditions`, `actions`, plus scheduling fields)
+* `PATCH /rules/:id` → update
+* `DELETE /rules/:id` → delete
+
+### Run endpoints
+
+* `POST /rules/:id/dry-run` → build SQL WHERE and return `{matchedCount, sample[]}`
+* `POST /rules/:id/apply` → apply in batches with guardrails
+* `GET /rules/:id/runs` → list last 50
+* `GET /rules/runs/:runId` → get run details
+
+### Metadata endpoints (for dynamic dropdowns)
+
+You need these for UI:
+
+* `GET /meta/campaigns` (optional if you have campaigns dropdown)
+* `GET /meta/lists?campaignId=...` (or just all lists)
+* `GET /meta/statuses?campaignId=...`
+
+**Statuses rule:**
+
+* If campaign selected → return campaign statuses + system statuses
+* Else → return all statuses
+
+**Lists rule:**
+
+* Return all lists (or filter by campaign if you prefer, but your UI currently suggests campaign filters lists + statuses)
+
+## 2.3 QueryBuilder / DSL support
+
+Your `ConditionSpec` / `ConditionGroup` is the contract between UI and backend.
+
+Minimum required backend support:
+
+* AND/OR groups nesting
+* Operators used by UI:
+
+  * `= != > >= < <=`
+  * `IN`
+  * `CONTAINS` (maps to `LIKE %x%`)
+  * `OLDER_THAN_DAYS` (maps to `field <= NOW() - INTERVAL n DAY`)
+  * BETWEEN / NOT BETWEEN (UI expands into groups of >= and <= or < and >)
+
+Backend must:
+
+* return `sql + params`
+* always parameterize values (no string concatenation for user data)
+
+## 2.4 Apply safety rails (must-have)
+
+* Require at least one TO action
+* Require `conditions.where` exists
+* Require successful dry-run in last 30 minutes (you already do)
+* Protected list/status exclusions (optional but recommended)
+* Apply in batches using `LIMIT batchSize` loop
+* Log run in `lead_rule_runs`
+
+## 2.5 Scheduling runner (automation)
+
+Since you’ve enabled `ScheduleModule.forRoot()`:
+
+Add a service that runs every minute (or every 30 seconds) to:
+
+1. Select due rules:
+
+   * `is_active=1`
+   * `interval_minutes IS NOT NULL AND > 0`
+   * `next_exec_at <= NOW()`
+   * `locked_at IS NULL`
+2. Lock them (`locked_at`, `locked_by`)
+3. Run:
+
+   * (recommended) perform a dry-run preview first (or reuse normal apply, but dry-run gives safety)
+   * call apply with `apply_batch_size` and `apply_max_to_update` **if set**, else use safe defaults server-side
+4. Update `last_run_at`, compute next `next_exec_at`
+5. Unlock
+6. Handle stale locks (unlock if locked_at older than X minutes)
+
+**Important:** If `apply_batch_size` / `apply_max_to_update` are NULL, treat them as “use default” (server-side), not “0”.
+
+---
+
+# 3) Vicidial integration (PHP proxy + UI page)
+
+## 3.1 Proxy (`rules_proxy.php`)
+
+Purpose: make calls same-origin from VICIdial UI → backend.
+
+Changes you must do:
+
+1. Add allowlist paths for metadata endpoints:
+
+   * `/meta/statuses`
+   * `/meta/lists`
+   * `/meta/campaigns` (if used)
+
+Example allowlist additions:
+
+* `/rules`
+* `/dry-run`
+* `/meta`
+
+2. Forward querystring too (campaignId param):
+
+* You already forward the `path` only; ensure `path` can include `?campaignId=...` safely.
+
+  * Easiest: you already pass `path` as a single string; permit it and send it as-is.
+
+3. Keep timeouts reasonable (connect 5s, total 30s ok)
+
+## 3.2 UI file (`admin_advanced_rules.php`)
+
+Drop this file into VICIdial admin area and add it to menu.
+
+UI responsibilities:
+
+* Load rules list (GET /rules)
+* Open modal to create/edit
+* Build ConditionSpec + ActionSpec JSON
+* Dry-run button calls POST `/rules/:id/dry-run`
+* Apply button calls POST `/rules/:id/apply`
+
+### Dynamic dropdowns (required)
+
+#### Campaign dropdown
+
+* On page load: call `/meta/campaigns`
+* Populate “All campaigns” + campaigns list
+* On campaign change:
+
+  * call `/meta/lists?campaignId=...`
+  * call `/meta/statuses?campaignId=...`
+
+#### Lists dropdowns (FROM + TO)
+
+* Populate FROM list dropdown and TO list dropdown from the same lists response
+* TO list dropdown is single select, “Leave empty = no change”
+
+#### Status controls
+
+* FROM status is multi-select:
+
+  * show label like: `From Status (selected: N)`
+  * update count on change
+* TO status is single select dropdown:
+
+  * values are the same pool as statuses
+  * include “Leave empty = no change”
+
+### Scheduling UI
+
+Show fields:
+
+* interval_minutes (empty disables automation)
+* next_exec_at (optional; empty means backend computes next)
+* apply_batch_size (optional)
+* apply_max_to_update (optional)
+
+Important UI behavior:
+
+* These fields should default visually to empty unless rule already has values.
+* If you want placeholders “500” and “10000”, use placeholder attribute, not value.
+* When saving:
+
+  * send NULL (omit field) if empty
+  * send integer if present
+
+### Apply endpoint defaults (important)
+
+If you want batch/max optional:
+
+* UI should allow empty
+* Backend should interpret missing as defaults
+* But **when asked “are they same?”**
+
+  * No:
+
+    * **batchSize** = size of each update chunk
+    * **maxToUpdate** = cap on total leads updated in one run
+
+---
+
+# 4) “How to fetch all statuses & lists” (what they should implement)
+
+## 4.1 Status fetch logic
+
+Backend queries:
+
+* If no campaign selected:
+
+  * system statuses:
+
+    * `vicidial_statuses`
+
+* If campaign selected:
+
+  * campaign statuses:
+
+    * `vicidial_campaign_statuses WHERE campaign_id=?`
+  * union with system statuses (recommended)
+
+Return JSON as:
+
+```json
+[
+  {"status":"NEW","label":"NEW - New Lead"},
+  {"status":"A","label":"A - Answering Machine"},
+  ...
+]
+```
+
+## 4.2 Lists fetch logic
+
+Lists typically come from:
+
+* `vicidial_lists` (all lists)
+
+If you want campaign filter:
+
+* If you store list–campaign mapping somewhere, query that mapping.
+* If not, simplest is: return all lists always (campaign selection only filters statuses).
+
+Return JSON:
+
+```json
+[
+  {"list_id":1000,"label":"1000 - TESTLIST"},
+  {"list_id":1001,"label":"1001 - PROD"},
+  ...
+]
+```
+
+---
+
+# 5) Verification checklist (hand this to them)
+
+## DB
+
+* [ ] `lead_rules` exists with scheduling columns
+* [ ] `lead_rule_runs` exists
+* [ ] JSON constraints work (invalid JSON rejects)
+
+## Backend
+
+* [ ] CRUD works
+* [ ] `/rules/:id/dry-run` returns sample rows from `vicidial_list`
+* [ ] Apply blocked without recent dry-run
+* [ ] Apply updates `vicidial_list` correctly
+* [ ] Run logs created for DRY_RUN and APPLY
+* [ ] `/meta/statuses` returns correct pool (campaign-aware)
+* [ ] `/meta/lists` returns lists
+
+## Proxy
+
+* [ ] allowlist includes `/meta/*`
+* [ ] query params pass through
+
+## UI
+
+* [ ] From Status multi-select shows selected count
+* [ ] To List ID is dropdown populated from lists API
+* [ ] To Status is dropdown (single select) populated from statuses API
+* [ ] Campaign change refetches lists + statuses
+* [ ] Scheduling fields save/load correctly and allow empty
+
+## Automation
+
+* [ ] Runner picks due rules only
+* [ ] Locking prevents double execution
+* [ ] Updates next_exec_at correctly
+* [ ] Stale locks cleanup works
+
+---
+
+# 6) What files they need to create / modify
+
+1. **Database migrations** (SQL above)
+2. **NestJS**
+
+   * `RulesModule`, `RulesController`, `RulesService`
+   * `DryRunService`
+   * `QueryBuilderService`
+   * `MetaController` (lists/statuses/campaigns)
+   * `SchedulerService` (automation runner)
+3. **VICIdial**
+
+   * `admin_advanced_rules.php` (UI)
+   * `rules_proxy.php` (proxy allowlist + pass-through)
+
+---
+
+If you want, paste your current `rules_proxy.php` allowlist and your desired metadata endpoint paths (exact names), and I’ll give you the **exact updated allowlist + sample NestJS controller code for `/meta/lists` and `/meta/statuses`** that matches the “campaign selected → campaign statuses else all statuses” rule and supports both FROM/TO dropdowns.
