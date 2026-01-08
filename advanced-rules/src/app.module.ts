@@ -5,7 +5,6 @@ import { QueryBuilderService } from './common/rules/query-builder/query-builder.
 import { DatabaseModule } from './database/database.module';
 import { DryRunModule } from './dry-run/dry-run.module';
 import { RulesModule } from './rules/rules.module';
-import { AmdModule } from './amd/amd.module';
 
 @Module({
   imports: [
@@ -14,7 +13,6 @@ import { AmdModule } from './amd/amd.module';
     RulesModule,
     DryRunModule,
     ScheduleModule.forRoot(),
-    AmdModule, // ✅ enables cron/interval/timeout decorators app-wide
   ],
   providers: [QueryBuilderService],
 })
