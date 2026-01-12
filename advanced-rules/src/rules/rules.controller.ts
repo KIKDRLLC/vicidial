@@ -32,10 +32,7 @@ export class RulesController {
     return this.rulesService.findAll();
   }
 
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.rulesService.findOne(Number(id));
-  }
+
 
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdateRuleDto) {
@@ -107,4 +104,17 @@ export class RulesController {
   statuses(@Query('campaignId') campaignId?: string) {
     return this.rulesService.listStatuses(campaignId);
   }
+
+
+  @Post(':id/clone')
+  clone(@Param('id') id: string, @Body() body?: { name?: string }) {
+  return this.rulesService.cloneRule(Number(id), body?.name);
+  }
+  
+
+    @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.rulesService.findOne(Number(id));
+  }
+
 }

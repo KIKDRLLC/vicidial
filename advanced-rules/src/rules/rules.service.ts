@@ -421,4 +421,90 @@ export class RulesService {
     );
     return rows;
   }
+  async cloneRule(ruleId: number, requestedName?: string) {
+  // Pull raw DB row so we can copy fields without any mapping surprises
+  const [rows] = await this.db.query(`SELECT * FROM lead_rules WHERE id = ?`, [
+    ruleId,
+  ]);
+  const src = (rows as any[])[0];
+  if (!src) throw new NotFoundException('Rule not found');
+
+  const baseName =
+    (requestedName && requestedName.trim()) ||
+    `${src.name ?? 'Untitled Rule'} (Copy)`;
+
+  // Ensure unique name
+  const uniqueName = await this.makeUniqueRuleName(baseName);
+
+  // Decide what to copy vs reset
+  const description = src.description ?? null;
+
+  // keep as stored (already JSON text in DB)
+  const conditionsJson = src.conditions_json ?? JSON.stringify({ where: { op: 'AND', rules: [] } });
+  const actionsJson = src.actions_json ?? JSON.stringify({});
+
+  // Copy scheduling limits (your call)
+  const intervalMinutes = src.interval_minutes ?? null;
+  const applyBatchSize = src.apply_batch_size ?? null;
+  const applyMaxToUpdate = src.apply_max_to_update ?? null;
+
+  // Reset run/lock state
+  const nextExecAt = null;
+  // last_run_at exists in table; not in your INSERT list currently, so stays NULL by default
+  // locked_at/locked_by also not in INSERT list, so NULL by default
+
+  const [res] = await this.db.query(
+    `INSERT INTO lead_rules
+      (name, description, is_active, conditions_json, actions_json,
+       interval_minutes, next_exec_at, apply_batch_size, apply_max_to_update,
+       last_run_at, locked_at, locked_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+    [
+      uniqueName,
+      description,
+      0, // force inactive
+      conditionsJson,
+      actionsJson,
+      intervalMinutes,
+      nextExecAt,
+      applyBatchSize,
+      applyMaxToUpdate,
+    ],
+  );
+
+  return { id: (res as any).insertId };
+}
+
+/**
+ * Makes sure the cloned rule name doesn't collide.
+ * Example:
+ *   "Rule (Copy)" -> if exists, try "Rule (Copy 2)", "Rule (Copy 3)"...
+ */
+private async makeUniqueRuleName(baseName: string) {
+  const trimmed = baseName.trim();
+  if (!trimmed) return 'Cloned Rule';
+
+  // quick check if available
+  const exists = await this.ruleNameExists(trimmed);
+  if (!exists) return trimmed;
+
+  // If "X (Copy)" already exists, append increment
+  for (let i = 2; i <= 50; i++) {
+    const candidate = `${trimmed} ${i}`.replace(/\s+/g, ' ').trim();
+    const used = await this.ruleNameExists(candidate);
+    if (!used) return candidate;
+  }
+
+  // Fallback: timestamp suffix
+  return `${trimmed} ${Date.now()}`;
+}
+
+private async ruleNameExists(name: string) {
+  const [rows] = await this.db.query(
+    `SELECT 1 FROM lead_rules WHERE name = ? LIMIT 1`,
+    [name],
+  );
+  return (rows as any[]).length > 0;
+}
+
 }

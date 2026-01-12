@@ -539,6 +539,7 @@ $RULES_API_KEY  = '';  // optional
           <td>${rule.updated_at || ''}</td>
           <td>
             <button type="button" class="btn" onclick="openEditRule(${rule.id});">Edit</button>
+            <button type="button" class="btn" onclick="cloneRule(${rule.id});">Clone</button>
             <button type="button" class="btn" onclick="dryRunRule(${rule.id});">Dry-run</button>
             <button type="button" class="btn" onclick="viewRuns(${rule.id});">Runs</button>
             <button type="button" class="btn" onclick="applyRulePrompt(${rule.id});">Apply…</button>
@@ -1444,6 +1445,41 @@ function updateBetweenInputsVisibility() {
       setErr('Apply failed: ' + String(e));
     }
   }
+
+  async function cloneRule(id) {
+  if (!confirm('Clone rule #' + id + '? The clone will be created as inactive.')) return;
+
+  setMsg('Cloning rule ' + id + ' …');
+  clearDetails();
+
+  try {
+    // If you support custom naming later:
+    // const newName = prompt('Name for cloned rule (optional):', '');
+    // const body = newName ? { name: newName } : {};
+
+    const res = await apiFetch('/rules/' + id + '/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}) // keep empty for now
+    });
+
+    const newId = res?.id;
+    if (!newId) {
+      setErr('Clone succeeded but no new id returned: ' + JSON.stringify(res));
+      loadRules();
+      return;
+    }
+
+    setMsg('Cloned rule #' + id + ' → new rule #' + newId);
+    await loadRules();
+
+    // Open the cloned rule for editing immediately
+    await openEditRule(newId);
+  } catch (e) {
+    setErr('Clone failed: ' + String(e));
+  }
+}
+
 
   // Campaign change should refresh both FROM and TO dropdowns (lists + statuses)
   document.getElementById('from-campaign-id')?.addEventListener('change', async () => {
