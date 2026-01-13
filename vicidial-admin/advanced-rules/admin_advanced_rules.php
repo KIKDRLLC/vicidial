@@ -18,7 +18,10 @@ $RULES_API_KEY  = '';  // optional
 <head>
   <meta charset="utf-8">
   <title>Lead Automation Rules</title>
-  <link rel="stylesheet" type="text/css" href="vicidial_styles.css">
+
+  <!-- FIX: use VICIdial stylesheet endpoint (common) -->
+  <link rel="stylesheet" type="text/css" href="vicidial_stylesheet.php">
+
   <style>
     body { font-family: Arial, sans-serif; font-size: 12px; }
     .rules-container { margin: 12px 18px; background: #fff; border: 1px solid #ccc; padding: 14px; max-width: 1200px; }
@@ -75,7 +78,7 @@ $RULES_API_KEY  = '';  // optional
 
     .ytel-field label { display:block; font-size:11px; color:#333; margin-bottom:3px; }
 
-    /* NEW: label helper for inline count pill */
+    /* label helper for inline count pill */
     .label-flex { display:flex; justify-content:space-between; align-items:center; }
     .label-flex .pill { font-size:10px; padding:1px 6px; }
 
@@ -261,7 +264,7 @@ $RULES_API_KEY  = '';  // optional
             <div class="ytel-help">Selecting a campaign filters Lists + Statuses.</div>
           </div>
 
-          <!-- ✅ FIXED: From List is now MULTI with count pill -->
+          <!-- FIX: multi-select + count pill -->
           <div class="ytel-field">
             <label class="label-flex">
               <span>From List</span>
@@ -270,7 +273,7 @@ $RULES_API_KEY  = '';  // optional
             <select id="from-list-id" multiple size="8" style="height:140px;">
               <!-- dynamically populated -->
             </select>
-            <div class="ytel-help">Maps to <code>list_id</code> (supports multi)</div>
+            <div class="ytel-help">Maps to <code>list_id</code> (supports multi). No selection = All lists.</div>
           </div>
         </div>
 
@@ -316,9 +319,10 @@ $RULES_API_KEY  = '';  // optional
                 <option value="=">equal(=)</option>
                 <option value="!=">not equal(≠)</option>
                 <option value=">=">greater than or equal(>=)</option>
-                <option value=">">greater than(>) </option>
+                <option value=">">greater than(>)</option>
                 <option value="<=">less than or equal(<=)</option>
                 <option value="<">less than(<)</option>
+                <option value="IN">In (CSV)</option>
                 <option value="BETWEEN">Between</option>
                 <option value="NOT_BETWEEN">Not Between</option>
               </select>
@@ -335,7 +339,7 @@ $RULES_API_KEY  = '';  // optional
                 <option value="=">equal(=)</option>
                 <option value="!=">not equal(≠)</option>
                 <option value=">=">greater than or equal(>=)</option>
-                <option value=">">greater than(>) </option>
+                <option value=">">greater than(>)</option>
                 <option value="<=">less than or equal(<=)</option>
                 <option value="<">less than(<)</option>
                 <option value="BETWEEN">Between</option>
@@ -361,7 +365,7 @@ $RULES_API_KEY  = '';  // optional
                 <option value="=">equal(=)</option>
                 <option value="!=">not equal(≠)</option>
                 <option value=">=">greater than or equal(>=)</option>
-                <option value=">">greater than(>) </option>
+                <option value=">">greater than(>)</option>
                 <option value="<=">less than or equal(<=)</option>
                 <option value="<">less than(<)</option>
                 <option value="BETWEEN">Between</option>
@@ -479,10 +483,14 @@ $RULES_API_KEY  = '';  // optional
   }
 
   function clearDetails() {
-    document.getElementById('runs-block').style.display = 'none';
-    document.getElementById('sample-block').style.display = 'none';
-    document.getElementById('runs-output').textContent = '';
-    document.getElementById('sample-rows').innerHTML = '';
+    const rb = document.getElementById('runs-block');
+    const sb = document.getElementById('sample-block');
+    if (rb) rb.style.display = 'none';
+    if (sb) sb.style.display = 'none';
+    const ro = document.getElementById('runs-output');
+    if (ro) ro.textContent = '';
+    const sr = document.getElementById('sample-rows');
+    if (sr) sr.innerHTML = '';
   }
 
   async function apiFetch(path, opts) {
@@ -520,7 +528,7 @@ $RULES_API_KEY  = '';  // optional
     setMsg('Loading rules...');
     clearDetails();
     const tbody = document.getElementById('rules-rows');
-    tbody.innerHTML = '';
+    if (tbody) tbody.innerHTML = '';
     try {
       const rules = await apiFetch('/rules');
       if (!Array.isArray(rules)) {
@@ -691,17 +699,17 @@ $RULES_API_KEY  = '';  // optional
       rules.push({ field: 'list_id', op: 'IN', value: listIds });
     }
 
-    // status multi-select
+    // status (multi)
     const statuses = readMultiSelectValues('from-status');
     if (statuses.length === 1) rules.push({ field: 'status', op: '=', value: statuses[0] });
     if (statuses.length > 1) rules.push({ field: 'status', op: 'IN', value: statuses });
 
-    // called_since_last_reset dropdown
+    // called_since_last_reset
     const csrMode = (document.getElementById('from-called-since-mode')?.value || '').trim();
     if (csrMode === 'YES') rules.push({ field: 'called_since_last_reset', op: '>', value: 0 });
     if (csrMode === 'NO')  rules.push({ field: 'called_since_last_reset', op: '=', value: 0 });
 
-    // entry_date older-than days (shortcut)
+    // entry_date older-than days
     const daysEntryRaw = (document.getElementById('from-days-entry')?.value || '').trim();
     if (daysEntryRaw !== '') {
       const n = parseInt(daysEntryRaw, 10);
@@ -712,7 +720,7 @@ $RULES_API_KEY  = '';  // optional
     const phoneContains = (document.getElementById('from-phone-contains')?.value || '').trim();
     if (phoneContains) rules.push({ field: 'phone_number', op: 'CONTAINS', value: phoneContains });
 
-    // called_count compare block
+    // called_count compare
     const ccOp = (document.getElementById('cc-op')?.value || '').trim();
     const ccV1 = (document.getElementById('cc-v1')?.value || '').trim();
     const ccV2 = (document.getElementById('cc-v2')?.value || '').trim();
@@ -722,12 +730,6 @@ $RULES_API_KEY  = '';  // optional
       const norm2 = (ccV2 !== '' ? Number(ccV2) : '');
       const node = buildCompare('called_count', ccOp, norm1, norm2);
       if (node) rules.push(node);
-    } else {
-      const ccShortcut = (document.getElementById('from-called-count')?.value || '').trim();
-      if (ccShortcut !== '') {
-        const n = parseInt(ccShortcut, 10);
-        if (!isNaN(n) && n >= 0) rules.push({ field: 'called_count', op: '>=', value: n });
-      }
     }
 
     // entry_date datetime compare
@@ -812,7 +814,7 @@ $RULES_API_KEY  = '';  // optional
       'sample-limit',
       'sched-interval-minutes','sched-next-exec','sched-batch-size','sched-max-to-update',
       'from-match-mode','from-list-id','from-status','from-called-since-mode',
-      'from-called-count','from-days-entry','from-phone-contains',
+      'from-days-entry','from-phone-contains',
       'cc-op','cc-v1','cc-v2',
       'ed-op','ed-v1','ed-v2',
       'lc-op','lc-v1','lc-v2',
@@ -852,7 +854,6 @@ $RULES_API_KEY  = '';  // optional
     clearMultiSelect('from-list-id');
     clearMultiSelect('from-status');
     setValue('from-called-since-mode', '');
-    setValue('from-called-count', '');
     setValue('from-days-entry', '');
     setValue('from-phone-contains', '');
 
@@ -947,7 +948,6 @@ $RULES_API_KEY  = '';  // optional
     clearMultiSelect('from-list-id');
     clearMultiSelect('from-status');
     setValue('from-called-since-mode', '');
-    setValue('from-called-count', '');
     setValue('from-days-entry', '');
     setValue('from-phone-contains', '');
 
@@ -1019,12 +1019,11 @@ $RULES_API_KEY  = '';  // optional
       const flat = [];
       topRules.forEach(r => flattenRules(r, flat));
 
-      // list_id (supports '=' and 'IN')
+      // list_id
       const listEq = flat.find(x => x.field === 'list_id' && x.op === '=');
       const listIn = flat.find(x => x.field === 'list_id' && x.op === 'IN' && Array.isArray(x.value));
       if (listEq) setMultiSelectValues('from-list-id', [String(listEq.value ?? '')]);
       if (listIn) setMultiSelectValues('from-list-id', (listIn.value || []).map(String));
-      updateFromListCount();
 
       // status
       const statusEq = flat.find(x => x.field === 'status' && x.op === '=');
@@ -1032,17 +1031,21 @@ $RULES_API_KEY  = '';  // optional
       if (statusEq) setMultiSelectValues('from-status', [statusEq.value]);
       if (statusIn) setMultiSelectValues('from-status', statusIn.value);
 
+      // called_since_last_reset
       const csrGt = flat.find(x => x.field === 'called_since_last_reset' && x.op === '>' && Number(x.value) === 0);
       const csrEq0 = flat.find(x => x.field === 'called_since_last_reset' && x.op === '=' && Number(x.value) === 0);
       if (csrGt) setValue('from-called-since-mode', 'YES');
       if (csrEq0) setValue('from-called-since-mode', 'NO');
 
+      // entry_date OLDER_THAN_DAYS shortcut
       const entryOlder = flat.find(x => x.field === 'entry_date' && x.op === 'OLDER_THAN_DAYS');
       if (entryOlder && entryOlder.value != null) setValue('from-days-entry', String(entryOlder.value));
 
+      // phone contains
       const phoneContains = flat.find(x => x.field === 'phone_number' && x.op === 'CONTAINS');
       if (phoneContains) setValue('from-phone-contains', String(phoneContains.value ?? ''));
 
+      // TO
       if (actionsObj.move_to_list != null) setValue('to-list-id', String(actionsObj.move_to_list));
       if (actionsObj.update_status != null) setValue('to-status', String(actionsObj.update_status));
       setChecked('to-reset-called', !!actionsObj.reset_called_since_last_reset);
@@ -1064,9 +1067,346 @@ $RULES_API_KEY  = '';  // optional
     }
   }
 
-  // --- The rest of your existing functions (saveRule, deleteRule, dryRunRule, viewRuns, loadCampaignsForUI, loadListsForUI, loadStatusesForUI, applyRulePrompt, cloneRule) ---
-  // Keep them as you have, but ensure loadListsForUI supports multi selections and ends with updateFromListCount()
-  // and loadStatusesForUI ends with updateFromStatusCount()
+  async function saveRule() {
+    const name = (document.getElementById('rule-name')?.value || '').trim();
+    const description = (document.getElementById('rule-description')?.value || '').trim();
+    const isActive = !!document.getElementById('rule-active')?.checked;
+
+    if (!name) { alert('Name required'); return; }
+
+    const advancedOn = !!document.getElementById('toggle-advanced')?.checked;
+
+    let conditions, actions;
+
+    if (advancedOn) {
+      try { conditions = JSON.parse(document.getElementById('rule-conditions')?.value || ''); }
+      catch { alert('Invalid JSON in Conditions'); return; }
+
+      try { actions = JSON.parse(document.getElementById('rule-actions-json')?.value || '{}'); }
+      catch { alert('Invalid JSON in Actions'); return; }
+    } else {
+      conditions = buildConditionsSpecFromForm();
+      actions = buildActionsFromForm();
+    }
+
+    if (!conditions || typeof conditions !== 'object' || !conditions.where) {
+      alert('Conditions must include: { "where": { ... } }');
+      return;
+    }
+
+    const hasAction = !!(actions.move_to_list || actions.update_status || actions.reset_called_since_last_reset);
+    if (!hasAction) {
+      showToError(true);
+      alert('Please apply at least one change within the TO section.');
+      return;
+    }
+
+    if (!conditions.where.rules || !conditions.where.rules.length) {
+      if (!confirm('No FROM filters set. This may apply to ALL leads. Continue?')) return;
+    }
+
+    // Scheduling payload
+    const intervalRaw = (document.getElementById('sched-interval-minutes')?.value || '').trim();
+    const nextExecRaw = (document.getElementById('sched-next-exec')?.value || '').trim();
+    const batchRaw = (document.getElementById('sched-batch-size')?.value || '').trim();
+    const maxRaw   = (document.getElementById('sched-max-to-update')?.value || '').trim();
+
+    let intervalMinutes = intervalRaw !== '' ? parseInt(intervalRaw, 10) : null;
+    if (intervalMinutes != null && (isNaN(intervalMinutes) || intervalMinutes <= 0)) {
+      alert('Interval minutes must be a positive number');
+      return;
+    }
+
+    let applyBatchSize = batchRaw !== '' ? parseInt(batchRaw, 10) : 500;
+    if (isNaN(applyBatchSize) || applyBatchSize < 1 || applyBatchSize > 5000) {
+      alert('Batch size must be between 1 and 5000');
+      return;
+    }
+
+    let applyMaxToUpdate = maxRaw !== '' ? parseInt(maxRaw, 10) : 10000;
+    if (isNaN(applyMaxToUpdate) || applyMaxToUpdate < 1 || applyMaxToUpdate > 50000) {
+      alert('Max leads to update must be between 1 and 50000');
+      return;
+    }
+
+    const nextExecAt = nextExecRaw ? dtLocalToSql(nextExecRaw) : null;
+
+    const payload = {
+      name,
+      ...(description ? { description } : {}),
+      isActive,
+      conditions,
+      actions,
+      intervalMinutes,
+      nextExecAt,
+      applyBatchSize,
+      applyMaxToUpdate
+    };
+
+    try {
+      if (editingRuleId == null) {
+        await apiFetch('/rules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        setMsg('Rule created.');
+      } else {
+        await apiFetch('/rules/' + editingRuleId, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        setMsg('Rule updated.');
+      }
+
+      closeRuleModal();
+      loadRules();
+    } catch (e) {
+      setErr('Save failed: ' + String(e));
+    }
+  }
+
+  async function deleteRule(id) {
+    if (!confirm('Delete rule #' + id + '?')) return;
+    try {
+      await apiFetch('/rules/' + id, { method: 'DELETE' });
+      setMsg('Rule deleted.');
+      loadRules();
+    } catch (e) {
+      setErr('Delete failed: ' + String(e));
+    }
+  }
+
+  async function dryRunRule(id) {
+    setMsg('Running dry-run for rule ' + id + ' …');
+    clearDetails();
+    try {
+      const result = await apiFetch('/rules/' + id + '/dry-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+
+      const matched = result?.matchedCount ?? 0;
+      setMsg('Dry-run succeeded.\nMatched leads: ' + matched);
+
+      const sample = Array.isArray(result?.sample) ? result.sample : [];
+      const sampleBody = document.getElementById('sample-rows');
+      if (sampleBody) sampleBody.innerHTML = '';
+
+      sample.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.lead_id}</td>
+          <td>${r.list_id}</td>
+          <td><span class="status-badge">${escapeHtml(r.status || '')}</span></td>
+          <td>${escapeHtml(r.phone_number || '')}</td>
+          <td>${r.entry_date || ''}</td>
+          <td>${r.last_local_call_time || ''}</td>
+          <td>${r.called_count != null ? r.called_count : ''}</td>
+          <td>${r.called_since_last_reset != null ? r.called_since_last_reset : ''}</td>
+        `;
+        sampleBody.appendChild(tr);
+      });
+
+      const sb = document.getElementById('sample-block');
+      if (sb) sb.style.display = sample.length ? 'block' : 'none';
+    } catch (e) {
+      setErr('Dry-run failed: ' + String(e));
+    }
+  }
+
+  async function viewRuns(ruleId) {
+    setMsg('Loading runs for rule ' + ruleId + ' …');
+    clearDetails();
+    try {
+      const runs = await apiFetch('/rules/' + ruleId + '/runs');
+      if (!Array.isArray(runs) || runs.length === 0) {
+        setMsg('No runs yet for this rule.');
+        return;
+      }
+
+      let text = '';
+      runs.forEach(run => {
+        text += '#' + run.id + ' [' + run.run_type + '] ' +
+                'status=' + run.status +
+                ', matched=' + run.matched_count +
+                ', updated=' + run.updated_count +
+                ', started=' + (run.started_at || '') +
+                ', ended=' + (run.ended_at || '') + "\n";
+      });
+
+      const ro = document.getElementById('runs-output');
+      if (ro) ro.textContent = text;
+      const rb = document.getElementById('runs-block');
+      if (rb) rb.style.display = 'block';
+
+      setMsg('Loaded ' + runs.length + ' run(s).');
+    } catch (e) {
+      setErr('Failed to load runs: ' + String(e));
+    }
+  }
+
+  // --------- META LOADERS (RESTORED: fixes your crash) ----------
+  async function loadCampaignsForUI() {
+    const sel = document.getElementById('from-campaign-id');
+    if (!sel) return;
+
+    const selected = sel.value || '';
+    const rows = await apiFetch('/rules/meta/campaigns');
+
+    sel.innerHTML = `<option value="">All campaigns</option>`;
+    (rows || []).forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r.campaign_id;
+      opt.textContent = r.campaign_id + (r.campaign_name ? (' - ' + r.campaign_name) : '');
+      if (String(opt.value) === String(selected)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  // populate BOTH from-list-id (multi) and to-list-id (single)
+  async function loadListsForUI() {
+    const fromSel = document.getElementById('from-list-id');
+    const toSel   = document.getElementById('to-list-id');
+    if (!fromSel && !toSel) return;
+
+    const campaignId = (document.getElementById('from-campaign-id')?.value || '').trim();
+    const qp = campaignId ? ('?campaignId=' + encodeURIComponent(campaignId)) : '';
+
+    const fromSelected = new Set(
+      fromSel ? Array.from(fromSel.selectedOptions || []).map(o => String(o.value)) : []
+    );
+    const toSelected = toSel ? (toSel.value || '') : '';
+
+    const rows = await apiFetch('/rules/meta/lists' + qp);
+
+    if (fromSel) {
+      fromSel.innerHTML = '';
+      (rows || []).forEach(r => {
+        const opt = document.createElement('option');
+        opt.value = r.list_id;
+        opt.textContent =
+          r.list_id +
+          (r.list_name ? (' - ' + r.list_name) : '') +
+          (r.campaign_id ? (' [' + r.campaign_id + ']') : '');
+        if (fromSelected.has(String(opt.value))) opt.selected = true;
+        fromSel.appendChild(opt);
+      });
+    }
+
+    if (toSel) {
+      toSel.innerHTML = `<option value="">Leave empty = no change</option>`;
+      (rows || []).forEach(r => {
+        const opt = document.createElement('option');
+        opt.value = r.list_id;
+        opt.textContent =
+          r.list_id +
+          (r.list_name ? (' - ' + r.list_name) : '') +
+          (r.campaign_id ? (' [' + r.campaign_id + ']') : '');
+        if (String(opt.value) === String(toSelected)) opt.selected = true;
+        toSel.appendChild(opt);
+      });
+    }
+
+    updateFromListCount();
+  }
+
+  // populate BOTH from-status (multi) and to-status (single)
+  async function loadStatusesForUI() {
+    const fromSel = document.getElementById('from-status');
+    const toSel   = document.getElementById('to-status');
+    if (!fromSel && !toSel) return;
+
+    const campaignId = (document.getElementById('from-campaign-id')?.value || '').trim();
+    const qp = campaignId ? ('?campaignId=' + encodeURIComponent(campaignId)) : '';
+
+    const fromSelected = new Set(fromSel ? Array.from(fromSel.selectedOptions || []).map(o => o.value) : []);
+    const toSelected = toSel ? (toSel.value || '') : '';
+
+    const rows = await apiFetch('/rules/meta/statuses' + qp);
+
+    if (fromSel) {
+      fromSel.innerHTML = '';
+      (rows || []).forEach(r => {
+        const opt = document.createElement('option');
+        opt.value = r.status;
+        opt.textContent = r.status + (r.status_name ? (' - ' + r.status_name) : '');
+        if (fromSelected.has(opt.value)) opt.selected = true;
+        fromSel.appendChild(opt);
+      });
+    }
+
+    if (toSel) {
+      toSel.innerHTML = `<option value="">Leave empty = no change</option>`;
+      (rows || []).forEach(r => {
+        const opt = document.createElement('option');
+        opt.value = r.status;
+        opt.textContent = r.status + (r.status_name ? (' - ' + r.status_name) : '');
+        if (String(opt.value) === String(toSelected)) opt.selected = true;
+        toSel.appendChild(opt);
+      });
+    }
+
+    updateFromStatusCount();
+  }
+
+  async function applyRulePrompt(ruleId) {
+    const batchSize = prompt('Batch size? (e.g. 500)', '500');
+    if (batchSize === null) return;
+    const maxToUpdate = prompt('Max leads to update? (e.g. 10000)', '10000');
+    if (maxToUpdate === null) return;
+
+    const b = parseInt(batchSize, 10);
+    const m = parseInt(maxToUpdate, 10);
+    if (isNaN(b) || isNaN(m) || b <= 0 || m <= 0) { alert('Invalid numbers.'); return; }
+
+    if (!confirm('Apply rule ' + ruleId + ' with batchSize=' + b + ', maxToUpdate=' + m + ' ?')) return;
+
+    setMsg('Applying rule ' + ruleId + ' …');
+    clearDetails();
+    try {
+      const result = await apiFetch('/rules/' + ruleId + '/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batchSize: b, maxToUpdate: m })
+      });
+
+      setMsg('Apply finished:\n' + JSON.stringify(result, null, 2));
+      viewRuns(ruleId);
+    } catch (e) {
+      setErr('Apply failed: ' + String(e));
+    }
+  }
+
+  async function cloneRule(id) {
+    if (!confirm('Clone rule #' + id + '? The clone will be created as inactive.')) return;
+
+    setMsg('Cloning rule ' + id + ' …');
+    clearDetails();
+
+    try {
+      const res = await apiFetch('/rules/' + id + '/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+
+      const newId = res?.id;
+      if (!newId) {
+        setErr('Clone succeeded but no new id returned: ' + JSON.stringify(res));
+        loadRules();
+        return;
+      }
+
+      setMsg('Cloned rule #' + id + ' → new rule #' + newId);
+      await loadRules();
+      await openEditRule(newId);
+    } catch (e) {
+      setErr('Clone failed: ' + String(e));
+    }
+  }
 
   // Campaign change should refresh both FROM and TO dropdowns (lists + statuses)
   document.getElementById('from-campaign-id')?.addEventListener('change', async () => {
@@ -1079,35 +1419,44 @@ $RULES_API_KEY  = '';  // optional
     loadRules();
     updateFromStatusCount();
     updateFromListCount();
-  });
+    updateBetweenInputsVisibility();
 
-  // Prevent jump/auto-scroll behavior for multi selects
-  const fromStatusSel = document.getElementById("from-status");
-  fromStatusSel?.addEventListener("click", (e) => e.preventDefault());
-  fromStatusSel?.addEventListener("mousedown", (e) => {
-    const sel = fromStatusSel;
-    const opt = e.target;
-    if (!sel || !opt || opt.tagName !== "OPTION") return;
-    const prevScrollTop = sel.scrollTop;
-    e.preventDefault();
-    e.stopPropagation();
-    opt.selected = !opt.selected;
-    sel.dispatchEvent(new Event("change", { bubbles: true }));
-    requestAnimationFrame(() => { sel.scrollTop = prevScrollTop; });
-  });
+    // Prevent jump/auto-scroll behavior for multi selects
+    const fromStatusSel = document.getElementById("from-status");
+    if (fromStatusSel) {
+      fromStatusSel.addEventListener("click", (e) => e.preventDefault());
+      fromStatusSel.addEventListener("mousedown", (e) => {
+        const opt = e.target;
+        if (!opt || opt.tagName !== "OPTION") return;
 
-  const fromListSel = document.getElementById("from-list-id");
-  fromListSel?.addEventListener("click", (e) => e.preventDefault());
-  fromListSel?.addEventListener("mousedown", (e) => {
-    const sel = fromListSel;
-    const opt = e.target;
-    if (!sel || !opt || opt.tagName !== "OPTION") return;
-    const prevScrollTop = sel.scrollTop;
-    e.preventDefault();
-    e.stopPropagation();
-    opt.selected = !opt.selected;
-    sel.dispatchEvent(new Event("change", { bubbles: true }));
-    requestAnimationFrame(() => { sel.scrollTop = prevScrollTop; });
+        const prevScrollTop = fromStatusSel.scrollTop;
+        e.preventDefault();
+        e.stopPropagation();
+
+        opt.selected = !opt.selected;
+        fromStatusSel.dispatchEvent(new Event("change", { bubbles: true }));
+
+        requestAnimationFrame(() => { fromStatusSel.scrollTop = prevScrollTop; });
+      });
+    }
+
+    const fromListSel = document.getElementById("from-list-id");
+    if (fromListSel) {
+      fromListSel.addEventListener("click", (e) => e.preventDefault());
+      fromListSel.addEventListener("mousedown", (e) => {
+        const opt = e.target;
+        if (!opt || opt.tagName !== "OPTION") return;
+
+        const prevScrollTop = fromListSel.scrollTop;
+        e.preventDefault();
+        e.stopPropagation();
+
+        opt.selected = !opt.selected;
+        fromListSel.dispatchEvent(new Event("change", { bubbles: true }));
+
+        requestAnimationFrame(() => { fromListSel.scrollTop = prevScrollTop; });
+      });
+    }
   });
 </script>
 
