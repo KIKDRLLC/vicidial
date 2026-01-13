@@ -1493,15 +1493,37 @@ function updateBetweenInputsVisibility() {
     updateFromStatusCount();
   });
 
-  // Keep the custom multi-select toggling behavior (and keep counts in sync)
-  const fromStatusSel = document.getElementById("from-status");
-  fromStatusSel?.addEventListener("mousedown", (e) => {
-    if (e.target && e.target.tagName === "OPTION") {
-      e.preventDefault();
-      e.target.selected = !e.target.selected;
-      fromStatusSel.dispatchEvent(new Event("change", { bubbles: true }));
-    }
+ // Keep the custom multi-select toggling behavior (and keep counts in sync)
+// AND prevent the browser from jumping/auto-scrolling to previously selected items
+const fromStatusSel = document.getElementById("from-status");
+
+// Block native click behavior (this is what causes the jump in many browsers)
+fromStatusSel?.addEventListener("click", (e) => {
+  e.preventDefault();
+});
+
+fromStatusSel?.addEventListener("mousedown", (e) => {
+  const sel = fromStatusSel;
+  const opt = e.target;
+
+  if (!sel || !opt || opt.tagName !== "OPTION") return;
+
+  // Preserve scroll position before toggle
+  const prevScrollTop = sel.scrollTop;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  opt.selected = !opt.selected;
+
+  sel.dispatchEvent(new Event("change", { bubbles: true }));
+
+  // Restore scroll position after the browser tries to adjust it
+  requestAnimationFrame(() => {
+    sel.scrollTop = prevScrollTop;
   });
+});
+
 </script>
 
 </body>
