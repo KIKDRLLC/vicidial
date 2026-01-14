@@ -1272,15 +1272,13 @@ $RULES_API_KEY  = '';  // optional
     const toSel   = document.getElementById('to-list-id');
     if (!fromSel && !toSel) return;
 
-    const campaignId = (document.getElementById('from-campaign-id')?.value || '').trim();
-    const qp = campaignId ? ('?campaignId=' + encodeURIComponent(campaignId)) : '';
 
     const fromSelected = new Set(
       fromSel ? Array.from(fromSel.selectedOptions || []).map(o => String(o.value)) : []
     );
     const toSelected = toSel ? (toSel.value || '') : '';
 
-    const rows = await apiFetch('/rules/meta/lists' + qp);
+    const rows = await apiFetch('/rules/meta/lists' );
 
     if (fromSel) {
       fromSel.innerHTML = '';
@@ -1410,7 +1408,6 @@ $RULES_API_KEY  = '';  // optional
 
   // Campaign change should refresh both FROM and TO dropdowns (lists + statuses)
   document.getElementById('from-campaign-id')?.addEventListener('change', async () => {
-    await loadListsForUI();
     await loadStatusesForUI();
     refreshBuilderHints();
   });
