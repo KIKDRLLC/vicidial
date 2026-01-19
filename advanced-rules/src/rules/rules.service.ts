@@ -113,7 +113,8 @@ export class RulesService {
         ? dto.intervalMinutes
         : existing.interval_minutes;
 
-    const nextExecAt =
+    // Use let so we can apply scheduler defaults below
+    let nextExecAt: Date | null =
       dto.nextExecAt !== undefined
         ? dto.nextExecAt
           ? new Date(dto.nextExecAt)
@@ -130,15 +131,17 @@ export class RulesService {
         ? dto.applyMaxToUpdate
         : existing.apply_max_to_update;
 
-    // If user disables interval -> also disable next_exec_at
+    // -----------------------------
+    // Scheduling fixes:
+    // 1) If interval disabled -> also disable next exec
+    // 2) causing "interval doesn't work" (scheduler requires next_exec_at NOT NULL)
+    // -----------------------------
     if (intervalMinutes == null) {
       nextExecAt = null;
     }
 
-    // If interval is enabled but nextExecAt is null, scheduler will never run.
-    // Default it.
     if (intervalMinutes != null && !nextExecAt) {
-      nextExecAt = new Date(Date.now() + intervalMinutes * 60_000);
+      nextExecAt = new Date(Date.now() + Number(intervalMinutes) * 60_000);
     }
 
     await this.db.query(
