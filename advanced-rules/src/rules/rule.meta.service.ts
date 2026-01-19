@@ -29,12 +29,11 @@ export class RulesMetaService {
       return rows;
     }
 
-    // All lists if no campaign selected
+    // All lists if no campaign selected (include inactive too)
     const [rows] = await this.db.query(
       `SELECT list_id, list_name, campaign_id, active
-       FROM vicidial_lists
-       WHERE active = 'Y'
-       ORDER BY list_id`,
+   FROM vicidial_lists
+   ORDER BY list_id`,
     );
     return rows;
   }
