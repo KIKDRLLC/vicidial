@@ -229,7 +229,7 @@ export class QueryBuilderService {
         }
         params.push(days);
         // "older than N days" => date is at least N days in the past
-        return `${col} IS NOT NULL AND TIMESTAMPDIFF(DAY, ${col}, NOW()) >= ?`;
+        return `${col} IS NOT NULL AND ${col} <= (NOW() - INTERVAL ? DAY)`;
       }
 
       case 'NEWER_THAN_DAYS': {
@@ -241,7 +241,7 @@ export class QueryBuilderService {
         }
         params.push(days);
         // "newer than N days" => date is at most N days in the past
-        return `${col} IS NOT NULL AND TIMESTAMPDIFF(DAY, ${col}, NOW()) <= ?`;
+        return `${col} IS NOT NULL AND ${col} >= (NOW() - INTERVAL ? DAY)`;
       }
 
       default:

@@ -349,14 +349,14 @@ function buildWhereFromForm () {
   if (statuses.length > 1)
     rules.push({ field: 'status', op: 'IN', value: statuses })
 
-  // called_since_last_reset
+  // called_since_last_reset (ENUM)  ✅ FIXED
   const csrMode = (
     document.getElementById('from-called-since-mode')?.value || ''
   ).trim()
   if (csrMode === 'YES')
-    rules.push({ field: 'called_since_last_reset', op: '>', value: 0 })
+    rules.push({ field: 'called_since_last_reset', op: '!=', value: 'N' })
   if (csrMode === 'NO')
-    rules.push({ field: 'called_since_last_reset', op: '=', value: 0 })
+    rules.push({ field: 'called_since_last_reset', op: '=', value: 'N' })
 
   // entry_date older-than days
   const daysEntryRaw = (
@@ -559,7 +559,6 @@ async function openCreateRule () {
   setValue('sched-interval-minutes', '')
   setValue('sched-next-exec', '')
   setValue('sched-time-of-day', '')
-  // default blank so server can default
   setValue('sched-batch-size', '')
   setValue('sched-max-to-update', '')
 
@@ -722,7 +721,6 @@ async function openEditRule (id) {
 
     resetBuilderUI()
 
-    // backend returns snake_case
     setValue(
       'sched-interval-minutes',
       rule.interval_minutes != null ? String(rule.interval_minutes) : ''
@@ -770,7 +768,6 @@ async function openEditRule (id) {
     const flat = []
     topRules.forEach(r => flattenRules(r, flat))
 
-    // list_id
     const listEq = flat.find(x => x.field === 'list_id' && x.op === '=')
     const listIn = flat.find(
       x => x.field === 'list_id' && x.op === 'IN' && Array.isArray(x.value)
@@ -780,7 +777,6 @@ async function openEditRule (id) {
     if (listIn)
       setMultiSelectValues('from-list-id', (listIn.value || []).map(String))
 
-    // status
     const statusEq = flat.find(x => x.field === 'status' && x.op === '=')
     const statusIn = flat.find(
       x => x.field === 'status' && x.op === 'IN' && Array.isArray(x.value)
@@ -788,44 +784,41 @@ async function openEditRule (id) {
     if (statusEq) setMultiSelectValues('from-status', [statusEq.value])
     if (statusIn) setMultiSelectValues('from-status', statusIn.value)
 
-    // called_since_last_reset
-    const csrGt = flat.find(
+    // called_since_last_reset (ENUM) ✅ FIXED
+    const csrNeN = flat.find(
       x =>
         x.field === 'called_since_last_reset' &&
-        x.op === '>' &&
-        Number(x.value) === 0
+        x.op === '!=' &&
+        String(x.value) === 'N'
     )
-    const csrEq0 = flat.find(
+    const csrEqN = flat.find(
       x =>
         x.field === 'called_since_last_reset' &&
         x.op === '=' &&
-        Number(x.value) === 0
+        String(x.value) === 'N'
     )
-    if (csrGt) setValue('from-called-since-mode', 'YES')
-    if (csrEq0) setValue('from-called-since-mode', 'NO')
+    if (csrNeN) setValue('from-called-since-mode', 'YES')
+    else if (csrEqN) setValue('from-called-since-mode', 'NO')
+    else setValue('from-called-since-mode', '')
 
-    // entry_date OLDER_THAN_DAYS shortcut
     const entryOlder = flat.find(
       x => x.field === 'entry_date' && x.op === 'OLDER_THAN_DAYS'
     )
     if (entryOlder && entryOlder.value != null)
       setValue('from-days-entry', String(entryOlder.value))
 
-    // last_local_call_time OLDER_THAN_DAYS shortcut
     const lastCallOlder = flat.find(
       x => x.field === 'last_local_call_time' && x.op === 'OLDER_THAN_DAYS'
     )
     if (lastCallOlder && lastCallOlder.value != null)
       setValue('from-days-lastcall', String(lastCallOlder.value))
 
-    // phone contains
     const phoneContains = flat.find(
       x => x.field === 'phone_number' && x.op === 'CONTAINS'
     )
     if (phoneContains)
       setValue('from-phone-contains', String(phoneContains.value ?? ''))
 
-    // TO
     if (actionsObj.move_to_list != null)
       setValue('to-list-id', String(actionsObj.move_to_list))
     if (actionsObj.update_status != null)
@@ -909,7 +902,6 @@ async function saveRule () {
       return
   }
 
-  // Scheduling payload (ALL optional; blank => unset/null)
   const intervalRaw = (
     document.getElementById('sched-interval-minutes')?.value || ''
   ).trim()
@@ -1293,7 +1285,6 @@ document
 document.addEventListener('DOMContentLoaded', async function () {
   await loadRules()
 
-  // preload lists + statuses so modal feels instant after first open
   try {
     await loadCampaignsForUI()
   } catch {}
