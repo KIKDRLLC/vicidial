@@ -216,6 +216,10 @@ export class RulesService {
     ruleId: number,
     apply: { batchSize: number; maxToUpdate: number },
   ) {
+    // Prevent concurrent APPLY runs for the same rule from overlapping.
+    // Advisory DB locks work even when target tables are MyISAM.
+    const lockName = `lead_rule_apply_${ruleId}`;
+
     if (process.env.ALLOW_RULE_UPDATES !== 'true') {
       return {
         ok: false,
@@ -251,10 +255,10 @@ export class RulesService {
       50000,
     );
 
-    if (!targetListId && !targetStatus) {
+    if (!targetListId && !targetStatus && !resetCalled) {
       return {
         ok: false,
-        message: 'No actions specified (move_to_list/update_status)',
+        message: 'No actions specified (move_to_list/update_status/reset)',
       };
     }
 
@@ -285,6 +289,22 @@ export class RulesService {
       };
     }
 
+    // Prevent multiple APPLY runs for the same rule from overlapping.
+    // (e.g., double-clicks, retries, parallel workers)
+    let gotLock = false;
+    const [lockRows] = await this.db.query(
+      `SELECT GET_LOCK(?, 0) AS got_lock`,
+      [lockName],
+    );
+    gotLock = Number((lockRows as any)[0]?.got_lock ?? 0) === 1;
+    if (!gotLock) {
+      return {
+        ok: false,
+        message:
+          'Another APPLY run is already in progress for this rule. Please try again after it finishes.',
+      };
+    }
+
     // Create APPLY run row with STARTED status
     const [runRes] = await this.db.query(
       `INSERT INTO lead_rule_runs
@@ -300,6 +320,7 @@ export class RulesService {
       const { sql: baseWhereSql, params } = this.qb.buildWhere(
         conditionSpec.where,
       );
+
       const protectedListClause =
         PROTECTED_LISTS.length > 0
           ? ` AND vicidial_list.list_id NOT IN (${PROTECTED_LISTS.map(() => '?').join(',')})`
@@ -309,6 +330,17 @@ export class RulesService {
         PROTECTED_STATUSES.length > 0
           ? ` AND vicidial_list.status NOT IN (${PROTECTED_STATUSES.map(() => '?').join(',')})`
           : '';
+
+      // Safety: refuse to run without a WHERE clause from DSL
+      if (!baseWhereSql || !baseWhereSql.trim()) {
+        await this.db.query(
+          `UPDATE lead_rule_runs
+           SET status = 'FAILED', error_text = ?, ended_at = NOW()
+           WHERE id = ?`,
+          ['Refusing to apply: empty WHERE.', runId],
+        );
+        return { ok: false, message: 'Refusing to apply: empty WHERE.' };
+      }
 
       const whereSql = `
   ${baseWhereSql}
@@ -333,20 +365,49 @@ export class RulesService {
 
       const toUpdate = Math.min(matchedCount, maxToUpdate);
       let updatedTotal = 0;
+
       // Fetch a sample of leads BEFORE updating, for logging
       const [sampleRows] = await this.db.query(
         `SELECT lead_id, list_id, status, phone_number
-   FROM vicidial_list
-   ${whereSql}
-   ORDER BY lead_id
-   LIMIT 50`,
+         FROM vicidial_list
+         ${whereSql}
+         ORDER BY lead_id
+         LIMIT 50`,
         finalParams,
       );
+
+      // Cursor-based batching (prevents re-updating same rows)
+      let lastLeadId = 0;
 
       while (updatedTotal < toUpdate) {
         const remaining = toUpdate - updatedTotal;
         const currentBatch = Math.min(batchSize, remaining);
 
+        // 1) Select deterministic next ids
+        const selectSql = `
+          SELECT vicidial_list.lead_id
+          FROM vicidial_list
+          ${whereSql}
+          AND vicidial_list.lead_id > ?
+          ORDER BY vicidial_list.lead_id
+          LIMIT ?
+        `;
+
+        const [idRows] = await this.db.query(selectSql, [
+          ...finalParams,
+          lastLeadId,
+          currentBatch,
+        ]);
+
+        const ids = (idRows as any[])
+          .map((r) => Number(r.lead_id))
+          .filter((n) => Number.isFinite(n));
+
+        if (ids.length === 0) break;
+
+        lastLeadId = ids[ids.length - 1];
+
+        // 2) Build SET
         const set: string[] = [];
         const updParams: any[] = [];
 
@@ -358,33 +419,36 @@ export class RulesService {
           set.push(`status = ?`);
           updParams.push(targetStatus);
         }
-
         if (resetCalled) {
-          set.push(`called_since_last_reset = 'N'`); // see next section
+          // enum('Y','N','Y1'...'D') - reset is 'N'
+          set.push(`called_since_last_reset = ?`);
+          updParams.push('N');
         }
 
         set.push(`modify_date = NOW()`);
 
-        const sql = `
-    UPDATE vicidial_list
-    SET ${set.join(', ')}
-    ${whereSql}
-    LIMIT ${currentBatch}
-  `;
+        // 3) Update only those ids
+        const ph = ids.map(() => '?').join(',');
+        const updateSql = `
+          UPDATE vicidial_list
+          SET ${set.join(', ')}
+          WHERE lead_id IN (${ph})
+        `;
 
-        const [res] = await this.db.query(sql, [...updParams, ...finalParams]);
-        const affected = (res as any).affectedRows ?? 0;
+        const [updRes] = await this.db.query(updateSql, [...updParams, ...ids]);
+        const affected = (updRes as any).affectedRows ?? 0;
+
         if (affected === 0) break;
 
-        updatedTotal += affected;
+        updatedTotal += Math.min(affected, toUpdate - updatedTotal);
       }
 
       // Mark run as SUCCESS
       await this.db.query(
         `UPDATE lead_rule_runs
-   SET matched_count = ?, updated_count = ?, status = 'SUCCESS',
-       sample_json = ?, ended_at = NOW()
-   WHERE id = ?`,
+         SET matched_count = ?, updated_count = ?, status = 'SUCCESS',
+             sample_json = ?, ended_at = NOW()
+         WHERE id = ?`,
         [matchedCount, updatedTotal, JSON.stringify(sampleRows ?? []), runId],
       );
 
@@ -397,6 +461,7 @@ export class RulesService {
         actionsApplied: {
           move_to_list: targetListId ?? null,
           update_status: targetStatus ?? null,
+          reset_called_since_last_reset: resetCalled ? true : null,
         },
       };
     } catch (e: any) {
@@ -408,6 +473,14 @@ export class RulesService {
         [String(e?.message ?? e), runId],
       );
       throw e;
+    } finally {
+      if (gotLock) {
+        try {
+          await this.db.query(`SELECT RELEASE_LOCK(?) AS released`, [lockName]);
+        } catch {
+          // ignore lock release errors
+        }
+      }
     }
   }
 
