@@ -2,8 +2,12 @@
 // rules_proxy.php
 header('Content-Type: application/json; charset=utf-8');
 
-$RULES_API_BASE = 'http://10.0.1.216:3000';
-$RULES_API_KEY  = ''; // optional
+$config = @include '/etc/vicidial/rules_proxy.conf.php';
+if (!is_array($config)) { $config = []; }
+
+$RULES_API_BASE = $config['RULES_API_BASE'] ?? 'http://10.0.1.216:3000';
+$RULES_API_KEY  = $config['RULES_API_KEY']  ?? '';
+
 
 $path = $_GET['path'] ?? '';
 if (!$path || $path[0] !== '/') {
