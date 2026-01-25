@@ -15,8 +15,33 @@ function dtLocalToSql (v) {
   if (!v) return null
   const s = String(v).trim()
   if (!s) return null
-  return s.replace('T', ' ') + ':00'
+
+  // YYYY-MM-DDTHH:MM
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) {
+    return s.replace('T', ' ') + ':00'
+  }
+
+  // YYYY-MM-DDTHH:MM:SS
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
+    return s.replace('T', ' ')
+  }
+
+  // Already SQL datetime
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+    return s
+  }
+
+  // Fallback: normalize first 16 chars
+  if (s.includes('T')) {
+    const base = s.slice(0, 16)
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(base)) {
+      return base.replace('T', ' ') + ':00'
+    }
+  }
+
+  return null
 }
+
 function sqlToDtLocal (v) {
   if (!v) return ''
   const s = String(v)
@@ -349,14 +374,14 @@ function buildWhereFromForm () {
   if (statuses.length > 1)
     rules.push({ field: 'status', op: 'IN', value: statuses })
 
-  // called_since_last_reset (ENUM)  ✅ FIXED
+  // called_since_last_reset
   const csrMode = (
     document.getElementById('from-called-since-mode')?.value || ''
   ).trim()
   if (csrMode === 'YES')
-    rules.push({ field: 'called_since_last_reset', op: '!=', value: 'N' })
+    rules.push({ field: 'called_since_last_reset', op: '>', value: 0 })
   if (csrMode === 'NO')
-    rules.push({ field: 'called_since_last_reset', op: '=', value: 'N' })
+    rules.push({ field: 'called_since_last_reset', op: '=', value: 0 })
 
   // entry_date older-than days
   const daysEntryRaw = (
@@ -559,6 +584,7 @@ async function openCreateRule () {
   setValue('sched-interval-minutes', '')
   setValue('sched-next-exec', '')
   setValue('sched-time-of-day', '')
+  // default blank so server can default
   setValue('sched-batch-size', '')
   setValue('sched-max-to-update', '')
 
@@ -721,6 +747,7 @@ async function openEditRule (id) {
 
     resetBuilderUI()
 
+    // backend returns snake_case
     setValue(
       'sched-interval-minutes',
       rule.interval_minutes != null ? String(rule.interval_minutes) : ''
@@ -744,19 +771,22 @@ async function openEditRule (id) {
       ? conditionsObj.where.rules
       : []
 
+    // 1) Populate BETWEEN / NOT_BETWEEN (existing behavior)
     topRules.forEach(r => {
       const ccBetween = tryExtractBetween(r, 'called_count')
       if (ccBetween) {
-        setValue('cc-op', ccBetween.op)
+        setValue('cc-op', ccBetween.op) // BETWEEN or NOT_BETWEEN
         setValue('cc-v1', ccBetween.v1 != null ? String(ccBetween.v1) : '')
         setValue('cc-v2', ccBetween.v2 != null ? String(ccBetween.v2) : '')
       }
+
       const edBetween = tryExtractBetween(r, 'entry_date')
       if (edBetween) {
         setValue('ed-op', edBetween.op)
         setValue('ed-v1', sqlToDtLocal(edBetween.v1))
         setValue('ed-v2', sqlToDtLocal(edBetween.v2))
       }
+
       const lcBetween = tryExtractBetween(r, 'last_local_call_time')
       if (lcBetween) {
         setValue('lc-op', lcBetween.op)
@@ -765,9 +795,53 @@ async function openEditRule (id) {
       }
     })
 
+    // Flatten all rules for simple lookups
     const flat = []
     topRules.forEach(r => flattenRules(r, flat))
 
+    // 2) Populate SIMPLE compares for cc/ed/lc (NEW)
+    //    Only fill if the field wasn't already populated by BETWEEN logic.
+    const allowedCcOps = new Set(['=', '!=', '>=', '>', '<=', '<', 'IN'])
+    const allowedDtOps = new Set(['=', '!=', '>=', '>', '<=', '<'])
+
+    const firstMatch = (field, allowed) =>
+      flat.find(x => x.field === field && allowed.has(String(x.op)))
+
+    /** called_count */
+    if (!String(document.getElementById('cc-op')?.value || '').trim()) {
+      const n = firstMatch('called_count', allowedCcOps)
+      if (n) {
+        setValue('cc-op', String(n.op || ''))
+        if (String(n.op) === 'IN' && Array.isArray(n.value)) {
+          setValue('cc-v1', n.value.join(','))
+        } else {
+          setValue('cc-v1', n.value != null ? String(n.value) : '')
+        }
+        setValue('cc-v2', '')
+      }
+    }
+
+    /** entry_date (datetime-local) */
+    if (!String(document.getElementById('ed-op')?.value || '').trim()) {
+      const n = firstMatch('entry_date', allowedDtOps)
+      if (n) {
+        setValue('ed-op', String(n.op || ''))
+        setValue('ed-v1', sqlToDtLocal(n.value))
+        setValue('ed-v2', '')
+      }
+    }
+
+    /** last_local_call_time (datetime-local) */
+    if (!String(document.getElementById('lc-op')?.value || '').trim()) {
+      const n = firstMatch('last_local_call_time', allowedDtOps)
+      if (n) {
+        setValue('lc-op', String(n.op || ''))
+        setValue('lc-v1', sqlToDtLocal(n.value))
+        setValue('lc-v2', '')
+      }
+    }
+
+    // list_id
     const listEq = flat.find(x => x.field === 'list_id' && x.op === '=')
     const listIn = flat.find(
       x => x.field === 'list_id' && x.op === 'IN' && Array.isArray(x.value)
@@ -777,6 +851,7 @@ async function openEditRule (id) {
     if (listIn)
       setMultiSelectValues('from-list-id', (listIn.value || []).map(String))
 
+    // status
     const statusEq = flat.find(x => x.field === 'status' && x.op === '=')
     const statusIn = flat.find(
       x => x.field === 'status' && x.op === 'IN' && Array.isArray(x.value)
@@ -784,41 +859,44 @@ async function openEditRule (id) {
     if (statusEq) setMultiSelectValues('from-status', [statusEq.value])
     if (statusIn) setMultiSelectValues('from-status', statusIn.value)
 
-    // called_since_last_reset (ENUM) ✅ FIXED
-    const csrNeN = flat.find(
+    // called_since_last_reset
+    const csrGt = flat.find(
       x =>
         x.field === 'called_since_last_reset' &&
-        x.op === '!=' &&
-        String(x.value) === 'N'
+        x.op === '>' &&
+        Number(x.value) === 0
     )
-    const csrEqN = flat.find(
+    const csrEq0 = flat.find(
       x =>
         x.field === 'called_since_last_reset' &&
         x.op === '=' &&
-        String(x.value) === 'N'
+        Number(x.value) === 0
     )
-    if (csrNeN) setValue('from-called-since-mode', 'YES')
-    else if (csrEqN) setValue('from-called-since-mode', 'NO')
-    else setValue('from-called-since-mode', '')
+    if (csrGt) setValue('from-called-since-mode', 'YES')
+    if (csrEq0) setValue('from-called-since-mode', 'NO')
 
+    // entry_date OLDER_THAN_DAYS shortcut
     const entryOlder = flat.find(
       x => x.field === 'entry_date' && x.op === 'OLDER_THAN_DAYS'
     )
     if (entryOlder && entryOlder.value != null)
       setValue('from-days-entry', String(entryOlder.value))
 
+    // last_local_call_time OLDER_THAN_DAYS shortcut
     const lastCallOlder = flat.find(
       x => x.field === 'last_local_call_time' && x.op === 'OLDER_THAN_DAYS'
     )
     if (lastCallOlder && lastCallOlder.value != null)
       setValue('from-days-lastcall', String(lastCallOlder.value))
 
+    // phone contains
     const phoneContains = flat.find(
       x => x.field === 'phone_number' && x.op === 'CONTAINS'
     )
     if (phoneContains)
       setValue('from-phone-contains', String(phoneContains.value ?? ''))
 
+    // TO
     if (actionsObj.move_to_list != null)
       setValue('to-list-id', String(actionsObj.move_to_list))
     if (actionsObj.update_status != null)
@@ -902,6 +980,7 @@ async function saveRule () {
       return
   }
 
+  // Scheduling payload (ALL optional; blank => unset/null)
   const intervalRaw = (
     document.getElementById('sched-interval-minutes')?.value || ''
   ).trim()
@@ -1285,6 +1364,7 @@ document
 document.addEventListener('DOMContentLoaded', async function () {
   await loadRules()
 
+  // preload lists + statuses so modal feels instant after first open
   try {
     await loadCampaignsForUI()
   } catch {}
