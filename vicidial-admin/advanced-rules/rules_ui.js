@@ -15,33 +15,8 @@ function dtLocalToSql (v) {
   if (!v) return null
   const s = String(v).trim()
   if (!s) return null
-
-  // YYYY-MM-DDTHH:MM
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) {
-    return s.replace('T', ' ') + ':00'
-  }
-
-  // YYYY-MM-DDTHH:MM:SS
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
-    return s.replace('T', ' ')
-  }
-
-  // Already SQL datetime
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
-    return s
-  }
-
-  // Fallback: normalize first 16 chars
-  if (s.includes('T')) {
-    const base = s.slice(0, 16)
-    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(base)) {
-      return base.replace('T', ' ') + ':00'
-    }
-  }
-
-  return null
+  return s.replace('T', ' ') + ':00'
 }
-
 function sqlToDtLocal (v) {
   if (!v) return ''
   const s = String(v)
@@ -50,8 +25,141 @@ function sqlToDtLocal (v) {
   return ''
 }
 
+
+// ---------- Scheduling time zone helpers ----------
+// We store/handle scheduling datetimes as UTC SQL strings ("YYYY-MM-DD HH:mm:ss").
+// The UI shows/accepts them in a user-selected IANA time zone (e.g. "America/New_York").
+//
+// This avoids "adds 5/8 hours" issues caused by parsing naive SQL strings into JS Date objects.
+
+function getBrowserTimeZone () {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
+function getScheduleTimeZone () {
+  const el = document.getElementById('sched-timezone')
+  const v = (el?.value || '').trim()
+  return v || getBrowserTimeZone()
+}
+
+// Parse "YYYY-MM-DDTHH:mm" into parts
+function parseDtLocalParts (dtLocal) {
+  const m = String(dtLocal || '').trim().match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
+  )
+  if (!m) return null
+  return {
+    y: parseInt(m[1], 10),
+    mo: parseInt(m[2], 10),
+    d: parseInt(m[3], 10),
+    h: parseInt(m[4], 10),
+    mi: parseInt(m[5], 10)
+  }
+}
+
+function pad2 (n) {
+  return String(n).padStart(2, '0')
+}
+function toSqlUtc (date) {
+  return (
+    date.getUTCFullYear() +
+    '-' +
+    pad2(date.getUTCMonth() + 1) +
+    '-' +
+    pad2(date.getUTCDate()) +
+    ' ' +
+    pad2(date.getUTCHours()) +
+    ':' +
+    pad2(date.getUTCMinutes()) +
+    ':00'
+  )
+}
+
+function getZonedParts (date, timeZone) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
+  const parts = dtf.formatToParts(date)
+  const get = type => parts.find(p => p.type === type)?.value
+  return {
+    y: parseInt(get('year'), 10),
+    mo: parseInt(get('month'), 10),
+    d: parseInt(get('day'), 10),
+    h: parseInt(get('hour'), 10),
+    mi: parseInt(get('minute'), 10),
+    s: parseInt(get('second'), 10)
+  }
+}
+
+// Convert a wall-clock datetime in a given IANA TZ to a real UTC Date.
+// Uses a small iterative correction loop to handle DST transitions.
+function zonedPartsToUtcDate (wanted, timeZone) {
+  // initial guess: treat wanted as UTC
+  let guess = new Date(Date.UTC(wanted.y, wanted.mo - 1, wanted.d, wanted.h, wanted.mi, 0))
+
+  for (let i = 0; i < 3; i++) {
+    const got = getZonedParts(guess, timeZone)
+
+    const wantedAsUtc = Date.UTC(
+      wanted.y,
+      wanted.mo - 1,
+      wanted.d,
+      wanted.h,
+      wanted.mi,
+      0
+    )
+    const gotAsUtc = Date.UTC(got.y, got.mo - 1, got.d, got.h, got.mi, 0)
+
+    const diffMs = wantedAsUtc - gotAsUtc
+    if (diffMs === 0) break
+    guess = new Date(guess.getTime() + diffMs)
+  }
+
+  return guess
+}
+
+// dt-local ("YYYY-MM-DDTHH:mm") in selected TZ -> UTC SQL ("YYYY-MM-DD HH:mm:ss")
+function schedDtLocalToSqlUtc (dtLocal, timeZone) {
+  const wanted = parseDtLocalParts(dtLocal)
+  if (!wanted) return null
+  const utc = zonedPartsToUtcDate(wanted, timeZone)
+  return toSqlUtc(utc)
+}
+
+// UTC SQL ("YYYY-MM-DD HH:mm:ss") -> dt-local ("YYYY-MM-DDTHH:mm") shown in selected TZ
+function sqlUtcToSchedDtLocal (sqlUtc, timeZone) {
+  if (!sqlUtc) return ''
+  const s = String(sqlUtc).trim()
+  // treat as UTC
+  const iso = s.includes('T') ? s : s.replace(' ', 'T')
+  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z')
+  if (isNaN(d.getTime())) return ''
+  const z = getZonedParts(d, timeZone)
+  return (
+    z.y +
+    '-' +
+    pad2(z.mo) +
+    '-' +
+    pad2(z.d) +
+    'T' +
+    pad2(z.h) +
+    ':' +
+    pad2(z.mi)
+  )
+}
 // compute nextExecAt from time-of-day if nextExec not provided
-function computeNextExecAtFromTimeOfDay (timeHHMM) {
+function computeNextExecAtFromTimeOfDay (timeHHMM, timeZone) {
   if (!timeHHMM) return null
   const parts = String(timeHHMM).split(':')
   if (parts.length < 2) return null
@@ -60,22 +168,40 @@ function computeNextExecAtFromTimeOfDay (timeHHMM) {
   const mm = parseInt(parts[1], 10)
   if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null
 
-  const now = new Date()
-  const d = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    hh,
-    mm,
-    0,
-    0
-  )
-  if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1)
+  const tz = timeZone || getScheduleTimeZone()
 
-  const pad = n => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}:00`
+  // "now" in the selected time zone
+  const nowUtc = new Date()
+  const nowZ = getZonedParts(nowUtc, tz)
+
+  // build desired wall-clock time in that time zone for today
+  let y = nowZ.y
+  let mo = nowZ.mo
+  let d = nowZ.d
+
+  const wantedToday = { y, mo, d, h: hh, mi: mm }
+  let utc = zonedPartsToUtcDate(wantedToday, tz)
+
+  // if already passed in that time zone, move to next day
+  const gotZ = getZonedParts(utc, tz)
+  const passed =
+    gotZ.y < y ||
+    gotZ.mo < mo ||
+    gotZ.d < d ||
+    (gotZ.y === y && gotZ.mo === mo && gotZ.d === d && (gotZ.h < hh || (gotZ.h === hh && gotZ.mi <= mm)))
+
+  // safer: compare desired wall time to current wall time
+  const nowWall = Date.UTC(nowZ.y, nowZ.mo - 1, nowZ.d, nowZ.h, nowZ.mi, 0)
+  const desiredWall = Date.UTC(y, mo - 1, d, hh, mm, 0)
+  if (desiredWall <= nowWall) {
+    // add 1 day in wall-clock
+    const tmp = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0))
+    tmp.setUTCDate(tmp.getUTCDate() + 1)
+    const next = { y: tmp.getUTCFullYear(), mo: tmp.getUTCMonth() + 1, d: tmp.getUTCDate(), h: hh, mi: mm }
+    utc = zonedPartsToUtcDate(next, tz)
+  }
+
+  return toSqlUtc(utc)
 }
 
 function setMsg (text) {
@@ -374,14 +500,14 @@ function buildWhereFromForm () {
   if (statuses.length > 1)
     rules.push({ field: 'status', op: 'IN', value: statuses })
 
-  // called_since_last_reset
+  // called_since_last_reset (ENUM: 'N' = not called since reset)
   const csrMode = (
     document.getElementById('from-called-since-mode')?.value || ''
   ).trim()
   if (csrMode === 'YES')
-    rules.push({ field: 'called_since_last_reset', op: '>', value: 0 })
+    rules.push({ field: 'called_since_last_reset', op: '<>', value: 'N' })
   if (csrMode === 'NO')
-    rules.push({ field: 'called_since_last_reset', op: '=', value: 0 })
+    rules.push({ field: 'called_since_last_reset', op: '=', value: 'N' })
 
   // entry_date older-than days
   const daysEntryRaw = (
@@ -584,6 +710,7 @@ async function openCreateRule () {
   setValue('sched-interval-minutes', '')
   setValue('sched-next-exec', '')
   setValue('sched-time-of-day', '')
+  setValue('sched-timezone', getBrowserTimeZone())
   // default blank so server can default
   setValue('sched-batch-size', '')
   setValue('sched-max-to-update', '')
@@ -694,6 +821,7 @@ function resetBuilderUI () {
   setValue('sched-interval-minutes', '')
   setValue('sched-next-exec', '')
   setValue('sched-time-of-day', '')
+  setValue('sched-timezone', getBrowserTimeZone())
   setValue('sched-batch-size', '')
   setValue('sched-max-to-update', '')
 
@@ -752,7 +880,8 @@ async function openEditRule (id) {
       'sched-interval-minutes',
       rule.interval_minutes != null ? String(rule.interval_minutes) : ''
     )
-    setValue('sched-next-exec', sqlToDtLocal(rule.next_exec_at))
+    setValue('sched-timezone', String(rule.schedule_tz || getBrowserTimeZone()))
+    setValue('sched-next-exec', sqlUtcToSchedDtLocal(rule.next_exec_at, getScheduleTimeZone()))
     setValue(
       'sched-batch-size',
       rule.apply_batch_size != null ? String(rule.apply_batch_size) : ''
@@ -762,6 +891,7 @@ async function openEditRule (id) {
       rule.apply_max_to_update != null ? String(rule.apply_max_to_update) : ''
     )
     setValue('sched-time-of-day', '')
+  setValue('sched-timezone', getBrowserTimeZone())
 
     if (conditionsObj.sampleLimit != null)
       setValue('sample-limit', String(conditionsObj.sampleLimit))
@@ -771,22 +901,19 @@ async function openEditRule (id) {
       ? conditionsObj.where.rules
       : []
 
-    // 1) Populate BETWEEN / NOT_BETWEEN (existing behavior)
     topRules.forEach(r => {
       const ccBetween = tryExtractBetween(r, 'called_count')
       if (ccBetween) {
-        setValue('cc-op', ccBetween.op) // BETWEEN or NOT_BETWEEN
+        setValue('cc-op', ccBetween.op)
         setValue('cc-v1', ccBetween.v1 != null ? String(ccBetween.v1) : '')
         setValue('cc-v2', ccBetween.v2 != null ? String(ccBetween.v2) : '')
       }
-
       const edBetween = tryExtractBetween(r, 'entry_date')
       if (edBetween) {
         setValue('ed-op', edBetween.op)
         setValue('ed-v1', sqlToDtLocal(edBetween.v1))
         setValue('ed-v2', sqlToDtLocal(edBetween.v2))
       }
-
       const lcBetween = tryExtractBetween(r, 'last_local_call_time')
       if (lcBetween) {
         setValue('lc-op', lcBetween.op)
@@ -795,51 +922,8 @@ async function openEditRule (id) {
       }
     })
 
-    // Flatten all rules for simple lookups
     const flat = []
     topRules.forEach(r => flattenRules(r, flat))
-
-    // 2) Populate SIMPLE compares for cc/ed/lc (NEW)
-    //    Only fill if the field wasn't already populated by BETWEEN logic.
-    const allowedCcOps = new Set(['=', '!=', '>=', '>', '<=', '<', 'IN'])
-    const allowedDtOps = new Set(['=', '!=', '>=', '>', '<=', '<'])
-
-    const firstMatch = (field, allowed) =>
-      flat.find(x => x.field === field && allowed.has(String(x.op)))
-
-    /** called_count */
-    if (!String(document.getElementById('cc-op')?.value || '').trim()) {
-      const n = firstMatch('called_count', allowedCcOps)
-      if (n) {
-        setValue('cc-op', String(n.op || ''))
-        if (String(n.op) === 'IN' && Array.isArray(n.value)) {
-          setValue('cc-v1', n.value.join(','))
-        } else {
-          setValue('cc-v1', n.value != null ? String(n.value) : '')
-        }
-        setValue('cc-v2', '')
-      }
-    }
-
-    /** entry_date (datetime-local) */
-    if (!String(document.getElementById('ed-op')?.value || '').trim()) {
-      const n = firstMatch('entry_date', allowedDtOps)
-      if (n) {
-        setValue('ed-op', String(n.op || ''))
-        setValue('ed-v1', sqlToDtLocal(n.value))
-        setValue('ed-v2', '')
-      }
-    }
-
-    /** last_local_call_time (datetime-local) */
-    if (!String(document.getElementById('lc-op')?.value || '').trim()) {
-      const n = firstMatch('last_local_call_time', allowedDtOps)
-      if (n) {
-        setValue('lc-op', String(n.op || ''))
-        setValue('lc-v1', sqlToDtLocal(n.value))
-        setValue('lc-v2', '')
-      }
-    }
 
     // list_id
     const listEq = flat.find(x => x.field === 'list_id' && x.op === '=')
@@ -859,21 +943,19 @@ async function openEditRule (id) {
     if (statusEq) setMultiSelectValues('from-status', [statusEq.value])
     if (statusIn) setMultiSelectValues('from-status', statusIn.value)
 
-    // called_since_last_reset
-    const csrGt = flat.find(
+    // called_since_last_reset (ENUM: 'N' = not called since reset)
+    const csrNeN = flat.find(
       x =>
         x.field === 'called_since_last_reset' &&
-        x.op === '>' &&
-        Number(x.value) === 0
+        (x.op === '!=' || x.op === '<>') &&
+        String(x.value) === 'N'
     )
-    const csrEq0 = flat.find(
-      x =>
-        x.field === 'called_since_last_reset' &&
-        x.op === '=' &&
-        Number(x.value) === 0
+    const csrEqN = flat.find(
+      x => x.field === 'called_since_last_reset' && x.op === '=' && String(x.value) === 'N'
     )
-    if (csrGt) setValue('from-called-since-mode', 'YES')
-    if (csrEq0) setValue('from-called-since-mode', 'NO')
+    if (csrNeN) setValue('from-called-since-mode', 'YES')
+    else if (csrEqN) setValue('from-called-since-mode', 'NO')
+    else setValue('from-called-since-mode', '')
 
     // entry_date OLDER_THAN_DAYS shortcut
     const entryOlder = flat.find(
@@ -1007,9 +1089,11 @@ async function saveRule () {
     intervalMinutes = v
   }
 
-  let nextExecAt = nextExecRaw ? dtLocalToSql(nextExecRaw) : null
+  const scheduleTimeZone = getScheduleTimeZone()
+
+  let nextExecAt = nextExecRaw ? schedDtLocalToSqlUtc(nextExecRaw, scheduleTimeZone) : null
   if (!nextExecAt && timeOfDay) {
-    nextExecAt = computeNextExecAtFromTimeOfDay(timeOfDay)
+    nextExecAt = computeNextExecAtFromTimeOfDay(timeOfDay, scheduleTimeZone)
   }
 
   let applyBatchSize = null
@@ -1039,6 +1123,7 @@ async function saveRule () {
     conditions,
     actions,
     ...(intervalMinutes !== null ? { intervalMinutes } : {}),
+    scheduleTimeZone,
     ...(nextExecAt !== null ? { nextExecAt } : {}),
     ...(applyBatchSize !== null ? { applyBatchSize } : {}),
     ...(applyMaxToUpdate !== null ? { applyMaxToUpdate } : {})

@@ -292,7 +292,7 @@ body {
   </script>
 
   <!-- Single JS file -->
-  <script src="rules_ui.js?v=<?php echo time(); ?>"></script>
+  <script src="advanced_rules/rules_ui.js?v=<?php echo time(); ?>"></script>
 </head>
 <body>
 
@@ -412,8 +412,17 @@ body {
           <div class="ytel-help">If Next execution time is empty, we will compute the next run at this time.</div>
         </div>
         <div class="ytel-field">
-          <label>&nbsp;</label>
-          <div class="ytel-help">Example: 09:30</div>
+          <label>Time zone</label>
+          <select id="sched-timezone">
+            <option value="">(Use browser default)</option>
+            <option value="UTC">UTC</option>
+            <option value="America/New_York">America/New_York (ET)</option>
+            <option value="America/Chicago">America/Chicago (CT)</option>
+            <option value="America/Denver">America/Denver (MT)</option>
+            <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
+            <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+          </select>
+          <div class="ytel-help">UI shows and saves scheduling times in this time zone (stored as UTC).</div>
         </div>
       </div>
 

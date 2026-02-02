@@ -11,6 +11,18 @@ import {
 } from 'src/common/rules/rule-contants/rule-constants';
 @Injectable()
 export class RulesService {
+  private toSqlUtc(date: Date): string {
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    return (
+      date.getUTCFullYear() + '-' +
+      pad2(date.getUTCMonth() + 1) + '-' +
+      pad2(date.getUTCDate()) + ' ' +
+      pad2(date.getUTCHours()) + ':' +
+      pad2(date.getUTCMinutes()) + ':' +
+      pad2(date.getUTCSeconds())
+    );
+  }
+
   constructor(
     @Inject('DB_POOL') private readonly db: Pool,
     private readonly qb: QueryBuilderService,
@@ -23,12 +35,13 @@ export class RulesService {
 
     // nextExecAt can be a one-time run even if interval is null (allowed),
     // BUT if interval is set and nextExecAt is missing, we MUST set a default.
-    let nextExecAt: Date | null = dto.nextExecAt
-      ? new Date(dto.nextExecAt)
-      : null;
+    const scheduleTimeZone = (dto as any).scheduleTimeZone ?? null;
 
+    let nextExecAt: string | null = dto.nextExecAt ? String(dto.nextExecAt) : null;
+
+    // If interval set and nextExecAt missing, default to now + interval (UTC)
     if (interval != null && !nextExecAt) {
-      nextExecAt = new Date(Date.now() + interval * 60_000);
+      nextExecAt = this.toSqlUtc(new Date(Date.now() + interval * 60_000));
     }
 
     const [res] = await this.db.query(
@@ -55,7 +68,7 @@ export class RulesService {
   async findAll() {
     const [rows] = await this.db.query(
       `SELECT id, name, description, is_active, created_at, updated_at,
-            interval_minutes, next_exec_at, apply_batch_size, apply_max_to_update,
+            interval_minutes, next_exec_at, schedule_tz, apply_batch_size, apply_max_to_update,
             last_run_at
      FROM lead_rules
      ORDER BY id DESC`,
@@ -90,6 +103,7 @@ export class RulesService {
       updated_at: rule.updated_at,
       interval_minutes: rule.interval_minutes,
       next_exec_at: rule.next_exec_at,
+      schedule_tz: rule.schedule_tz,
       apply_batch_size: rule.apply_batch_size,
       apply_max_to_update: rule.apply_max_to_update,
       last_run_at: rule.last_run_at,
@@ -113,12 +127,12 @@ export class RulesService {
         ? dto.intervalMinutes
         : existing.interval_minutes;
 
+    const scheduleTimeZone = (dto as any).scheduleTimeZone ?? undefined;
+
     // Use let so we can apply scheduler defaults below
-    let nextExecAt: Date | null =
+    let nextExecAt: string | null =
       dto.nextExecAt !== undefined
-        ? dto.nextExecAt
-          ? new Date(dto.nextExecAt)
-          : null
+        ? (dto.nextExecAt != null ? String(dto.nextExecAt) : null)
         : existing.next_exec_at;
 
     const applyBatchSize =
@@ -212,7 +226,7 @@ export class RulesService {
 
   // ---------- APPLY RULE (with DSL + safety rails) ----------
 
-  async applyRule(
+    async applyRule(
     ruleId: number,
     apply: { batchSize: number; maxToUpdate: number },
   ) {
@@ -441,12 +455,6 @@ export class RulesService {
         if (affected === 0) break;
 
         updatedTotal += Math.min(affected, toUpdate - updatedTotal);
-
-        const sleepMs = Math.min(
-          Math.max(Number(process.env.RULE_APPLY_BATCH_SLEEP_MS ?? 50), 0),
-          5000,
-        );
-        if (sleepMs > 0) await this.sleep(sleepMs);
       }
 
       // Mark run as SUCCESS
@@ -611,9 +619,4 @@ export class RulesService {
     );
     return (rows as any[]).length > 0;
   }
-
-  private sleep(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
 }

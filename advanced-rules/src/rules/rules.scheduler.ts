@@ -22,8 +22,8 @@ export class RulesSchedulerService {
        FROM lead_rules
        WHERE is_active=1
          AND next_exec_at IS NOT NULL
-         AND next_exec_at <= NOW()
-         AND (locked_at IS NULL OR locked_at < (NOW() - INTERVAL 5 MINUTE))
+         AND next_exec_at <= UTC_TIMESTAMP()
+         AND (locked_at IS NULL OR locked_at < (UTC_TIMESTAMP() - INTERVAL 5 MINUTE))
        ORDER BY next_exec_at ASC
        LIMIT 5`,
     );
@@ -32,9 +32,9 @@ export class RulesSchedulerService {
       // lock (MyISAM-safe-ish)
       const [lockRes] = await this.db.query(
         `UPDATE lead_rules
-         SET locked_at = NOW(), locked_by = ?
+         SET locked_at = UTC_TIMESTAMP(), locked_by = ?
          WHERE id = ?
-           AND (locked_at IS NULL OR locked_at < (NOW() - INTERVAL 5 MINUTE))`,
+           AND (locked_at IS NULL OR locked_at < (UTC_TIMESTAMP() - INTERVAL 5 MINUTE))`,
         [this.workerId, r.id],
       );
 
@@ -51,10 +51,10 @@ export class RulesSchedulerService {
         const interval = r.interval_minutes ?? null;
         await this.db.query(
           `UPDATE lead_rules
-           SET last_run_at = NOW(),
+           SET last_run_at = UTC_TIMESTAMP(),
                next_exec_at = CASE
                  WHEN ? IS NULL THEN NULL
-                 ELSE DATE_ADD(NOW(), INTERVAL ? MINUTE)
+                 ELSE DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
                END,
                locked_at = NULL, locked_by = NULL
            WHERE id = ?`,
@@ -66,8 +66,8 @@ export class RulesSchedulerService {
         // clear lock; optionally push next_exec_at forward to avoid hot-looping
         await this.db.query(
           `UPDATE lead_rules
-           SET last_run_at = NOW(),
-               next_exec_at = DATE_ADD(NOW(), INTERVAL 5 MINUTE),
+           SET last_run_at = UTC_TIMESTAMP(),
+               next_exec_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 5 MINUTE),
                locked_at = NULL, locked_by = NULL
            WHERE id = ?`,
           [r.id],

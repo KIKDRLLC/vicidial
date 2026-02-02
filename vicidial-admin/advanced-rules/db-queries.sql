@@ -1,4 +1,9 @@
 
+
+ALTER TABLE lead_rules
+  ADD COLUMN schedule_tz varchar(64) DEFAULT NULL AFTER next_exec_at;
+
+
 -- Lead Rules Table
 
 CREATE TABLE IF NOT EXISTS `lead_rules` (
