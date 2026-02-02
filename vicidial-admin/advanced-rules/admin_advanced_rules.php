@@ -292,7 +292,7 @@ body {
   </script>
 
   <!-- Single JS file -->
-  <script src="advanced_rules/rules_ui.js?v=<?php echo time(); ?>"></script>
+  <script src="rules_ui.js?v=<?php echo time(); ?>"></script>
 </head>
 <body>
 
