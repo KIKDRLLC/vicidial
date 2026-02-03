@@ -56,4 +56,9 @@ export class UpdateRuleDto {
   @Min(1)
   @Max(50000)
   applyMaxToUpdate?: number;
+
+
+    @IsOptional()
+  @IsString()
+  scheduleTimeZone?: string;
 }
