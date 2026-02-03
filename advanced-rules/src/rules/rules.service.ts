@@ -14,11 +14,16 @@ export class RulesService {
   private toSqlUtc(date: Date): string {
     const pad2 = (n: number) => String(n).padStart(2, '0');
     return (
-      date.getUTCFullYear() + '-' +
-      pad2(date.getUTCMonth() + 1) + '-' +
-      pad2(date.getUTCDate()) + ' ' +
-      pad2(date.getUTCHours()) + ':' +
-      pad2(date.getUTCMinutes()) + ':' +
+      date.getUTCFullYear() +
+      '-' +
+      pad2(date.getUTCMonth() + 1) +
+      '-' +
+      pad2(date.getUTCDate()) +
+      ' ' +
+      pad2(date.getUTCHours()) +
+      ':' +
+      pad2(date.getUTCMinutes()) +
+      ':' +
       pad2(date.getUTCSeconds())
     );
   }
@@ -37,7 +42,9 @@ export class RulesService {
     // BUT if interval is set and nextExecAt is missing, we MUST set a default.
     const scheduleTimeZone = (dto as any).scheduleTimeZone ?? null;
 
-    let nextExecAt: string | null = dto.nextExecAt ? String(dto.nextExecAt) : null;
+    let nextExecAt: string | null = dto.nextExecAt
+      ? String(dto.nextExecAt)
+      : null;
 
     // If interval set and nextExecAt missing, default to now + interval (UTC)
     if (interval != null && !nextExecAt) {
@@ -46,9 +53,9 @@ export class RulesService {
 
     const [res] = await this.db.query(
       `INSERT INTO lead_rules
-      (name, description, is_active, conditions_json, actions_json,
-       interval_minutes, next_exec_at, apply_batch_size, apply_max_to_update)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    (name, description, is_active, conditions_json, actions_json,
+     interval_minutes, next_exec_at, schedule_tz, apply_batch_size, apply_max_to_update)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         dto.name,
         dto.description ?? null,
@@ -57,6 +64,7 @@ export class RulesService {
         JSON.stringify(dto.actions),
         interval,
         nextExecAt,
+        scheduleTimeZone,
         dto.applyBatchSize ?? null,
         dto.applyMaxToUpdate ?? null,
       ],
@@ -132,7 +140,9 @@ export class RulesService {
     // Use let so we can apply scheduler defaults below
     let nextExecAt: string | null =
       dto.nextExecAt !== undefined
-        ? (dto.nextExecAt != null ? String(dto.nextExecAt) : null)
+        ? dto.nextExecAt != null
+          ? String(dto.nextExecAt)
+          : null
         : existing.next_exec_at;
 
     const applyBatchSize =
@@ -155,14 +165,16 @@ export class RulesService {
     }
 
     if (intervalMinutes != null && !nextExecAt) {
-      nextExecAt = new Date(Date.now() + Number(intervalMinutes) * 60_000);
+      nextExecAt = this.toSqlUtc(
+        new Date(Date.now() + Number(intervalMinutes) * 60_000),
+      );
     }
 
     await this.db.query(
       `UPDATE lead_rules
-     SET name=?, description=?, is_active=?, conditions_json=?, actions_json=?,
-         interval_minutes=?, next_exec_at=?, apply_batch_size=?, apply_max_to_update=?
-     WHERE id=?`,
+   SET name=?, description=?, is_active=?, conditions_json=?, actions_json=?,
+       interval_minutes=?, next_exec_at=?, schedule_tz=?, apply_batch_size=?, apply_max_to_update=?
+   WHERE id=?`,
       [
         name,
         description,
@@ -171,6 +183,7 @@ export class RulesService {
         JSON.stringify(actions),
         intervalMinutes,
         nextExecAt,
+        scheduleTimeZone ?? null,
         applyBatchSize,
         applyMaxToUpdate,
         id,
@@ -226,7 +239,7 @@ export class RulesService {
 
   // ---------- APPLY RULE (with DSL + safety rails) ----------
 
-    async applyRule(
+  async applyRule(
     ruleId: number,
     apply: { batchSize: number; maxToUpdate: number },
   ) {
