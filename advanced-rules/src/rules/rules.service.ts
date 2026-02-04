@@ -170,7 +170,7 @@ export class RulesService {
       );
     }
 
-    await this.db.query(
+    const result = await this.db.query(
       `UPDATE lead_rules
    SET name=?, description=?, is_active=?, conditions_json=?, actions_json=?,
        interval_minutes=?, next_exec_at=?, schedule_tz=?, apply_batch_size=?, apply_max_to_update=?
@@ -190,7 +190,7 @@ export class RulesService {
       ],
     );
 
-    return { ok: true };
+    return { ok: true, result };
   }
 
   async remove(id: number) {
