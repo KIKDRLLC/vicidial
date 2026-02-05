@@ -1,5 +1,5 @@
 /* /vicidial/advanced_rules/rules_ui.js
-   Single-file JS extracted from your pasted admin_advanced_rules.php <script> block.
+   Drop-in corrected version (includes working Preferred time <-> Next execution sync + TZ-safe UTC storage).
    Requires:
      window.RULES_API_BASE
      window.RULES_API_KEY
@@ -10,13 +10,30 @@ const API_KEY = window.RULES_API_KEY || ''
 
 let editingRuleId = null
 
-// datetime-local <-> SQL DATETIME
+// datetime-local <-> SQL DATETIME (ROBUST)
 function dtLocalToSql (v) {
   if (!v) return null
   const s = String(v).trim()
   if (!s) return null
-  return s.replace('T', ' ') + ':00'
+
+  // YYYY-MM-DDTHH:MM
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s))
+    return s.replace('T', ' ') + ':00'
+  // YYYY-MM-DDTHH:MM:SS
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s))
+    return s.replace('T', ' ')
+  // Already SQL datetime
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) return s
+
+  // Fallback: normalize first 16 chars
+  if (s.includes('T')) {
+    const base = s.slice(0, 16)
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(base))
+      return base.replace('T', ' ') + ':00'
+  }
+  return null
 }
+
 function sqlToDtLocal (v) {
   if (!v) return ''
   const s = String(v)
@@ -25,12 +42,10 @@ function sqlToDtLocal (v) {
   return ''
 }
 
-
 // ---------- Scheduling time zone helpers ----------
-// We store/handle scheduling datetimes as UTC SQL strings ("YYYY-MM-DD HH:mm:ss").
-// The UI shows/accepts them in a user-selected IANA time zone (e.g. "America/New_York").
-//
-// This avoids "adds 5/8 hours" issues caused by parsing naive SQL strings into JS Date objects.
+// Store/handle scheduling datetimes as UTC SQL strings ("YYYY-MM-DD HH:mm:ss").
+// UI shows/accepts them in a user-selected IANA TZ (e.g. "America/New_York").
+// Avoids "adds 5/8 hours" issues from naive SQL parsing.
 
 function getBrowserTimeZone () {
   try {
@@ -46,24 +61,24 @@ function getScheduleTimeZone () {
   return v || getBrowserTimeZone()
 }
 
-// Parse "YYYY-MM-DDTHH:mm" into parts
-function parseDtLocalParts (dtLocal) {
-  const m = String(dtLocal || '').trim().match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
-  )
-  if (!m) return null
-  return {
-    y: parseInt(m[1], 10),
-    mo: parseInt(m[2], 10),
-    d: parseInt(m[3], 10),
-    h: parseInt(m[4], 10),
-    mi: parseInt(m[5], 10)
+// Ensure a select can accept an arbitrary value (adds option if missing)
+function setSelectValueSafe (id, value) {
+  const el = document.getElementById(id)
+  if (!el) return
+  const v = String(value || '')
+  if (v && !Array.from(el.options).some(o => String(o.value) === v)) {
+    const opt = document.createElement('option')
+    opt.value = v
+    opt.textContent = v
+    el.appendChild(opt)
   }
+  el.value = v
 }
 
 function pad2 (n) {
   return String(n).padStart(2, '0')
 }
+
 function toSqlUtc (date) {
   return (
     date.getUTCFullYear() +
@@ -77,6 +92,21 @@ function toSqlUtc (date) {
     pad2(date.getUTCMinutes()) +
     ':00'
   )
+}
+
+// Parse "YYYY-MM-DDTHH:mm" into parts
+function parseDtLocalParts (dtLocal) {
+  const m = String(dtLocal || '')
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/)
+  if (!m) return null
+  return {
+    y: parseInt(m[1], 10),
+    mo: parseInt(m[2], 10),
+    d: parseInt(m[3], 10),
+    h: parseInt(m[4], 10),
+    mi: parseInt(m[5], 10)
+  }
 }
 
 function getZonedParts (date, timeZone) {
@@ -106,7 +136,9 @@ function getZonedParts (date, timeZone) {
 // Uses a small iterative correction loop to handle DST transitions.
 function zonedPartsToUtcDate (wanted, timeZone) {
   // initial guess: treat wanted as UTC
-  let guess = new Date(Date.UTC(wanted.y, wanted.mo - 1, wanted.d, wanted.h, wanted.mi, 0))
+  let guess = new Date(
+    Date.UTC(wanted.y, wanted.mo - 1, wanted.d, wanted.h, wanted.mi, 0)
+  )
 
   for (let i = 0; i < 3; i++) {
     const got = getZonedParts(guess, timeZone)
@@ -141,7 +173,6 @@ function schedDtLocalToSqlUtc (dtLocal, timeZone) {
 function sqlUtcToSchedDtLocal (sqlUtc, timeZone) {
   if (!sqlUtc) return ''
   const s = String(sqlUtc).trim()
-  // treat as UTC
   const iso = s.includes('T') ? s : s.replace(' ', 'T')
   const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z')
   if (isNaN(d.getTime())) return ''
@@ -158,7 +189,8 @@ function sqlUtcToSchedDtLocal (sqlUtc, timeZone) {
     pad2(z.mi)
   )
 }
-// compute nextExecAt from time-of-day if nextExec not provided
+
+// compute nextExecAt from time-of-day (HH:mm) in selected TZ, returning UTC SQL
 function computeNextExecAtFromTimeOfDay (timeHHMM, timeZone) {
   if (!timeHHMM) return null
   const parts = String(timeHHMM).split(':')
@@ -170,40 +202,115 @@ function computeNextExecAtFromTimeOfDay (timeHHMM, timeZone) {
 
   const tz = timeZone || getScheduleTimeZone()
 
-  // "now" in the selected time zone
+  // "now" in selected TZ
   const nowUtc = new Date()
   const nowZ = getZonedParts(nowUtc, tz)
 
-  // build desired wall-clock time in that time zone for today
-  let y = nowZ.y
-  let mo = nowZ.mo
-  let d = nowZ.d
+  const y = nowZ.y
+  const mo = nowZ.mo
+  const d = nowZ.d
 
-  const wantedToday = { y, mo, d, h: hh, mi: mm }
-  let utc = zonedPartsToUtcDate(wantedToday, tz)
-
-  // if already passed in that time zone, move to next day
-  const gotZ = getZonedParts(utc, tz)
-  const passed =
-    gotZ.y < y ||
-    gotZ.mo < mo ||
-    gotZ.d < d ||
-    (gotZ.y === y && gotZ.mo === mo && gotZ.d === d && (gotZ.h < hh || (gotZ.h === hh && gotZ.mi <= mm)))
-
-  // safer: compare desired wall time to current wall time
+  // compare desired wall time to current wall time
   const nowWall = Date.UTC(nowZ.y, nowZ.mo - 1, nowZ.d, nowZ.h, nowZ.mi, 0)
   const desiredWall = Date.UTC(y, mo - 1, d, hh, mm, 0)
+
+  let target = { y, mo, d, h: hh, mi: mm }
   if (desiredWall <= nowWall) {
     // add 1 day in wall-clock
     const tmp = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0))
     tmp.setUTCDate(tmp.getUTCDate() + 1)
-    const next = { y: tmp.getUTCFullYear(), mo: tmp.getUTCMonth() + 1, d: tmp.getUTCDate(), h: hh, mi: mm }
-    utc = zonedPartsToUtcDate(next, tz)
+    target = {
+      y: tmp.getUTCFullYear(),
+      mo: tmp.getUTCMonth() + 1,
+      d: tmp.getUTCDate(),
+      h: hh,
+      mi: mm
+    }
   }
 
+  const utc = zonedPartsToUtcDate(target, tz)
   return toSqlUtc(utc)
 }
 
+// ---------- Preferred time <-> Next execution sync (FIXED) ----------
+// Rules:
+// - If user edits Preferred time => Next exec becomes AUTO-managed (dataset.auto=1) and updates immediately.
+// - If user edits Next exec => AUTO-managed turns OFF and Preferred time mirrors Next exec HH:mm.
+// - If Time zone changes:
+//    - AUTO-managed => recompute Next exec from Preferred time in new TZ
+//    - manual Next exec => keep Preferred time mirroring Next exec
+
+let schedSyncing = false
+
+function isNextExecAutoManaged () {
+  const el = document.getElementById('sched-next-exec')
+  return !!(el && el.dataset && el.dataset.auto === '1')
+}
+
+function setNextExecAutoManaged (on) {
+  const el = document.getElementById('sched-next-exec')
+  if (!el || !el.dataset) return
+  el.dataset.auto = on ? '1' : ''
+}
+
+function syncPreferredTimeFromNextExec () {
+  if (schedSyncing) return
+  const nextEl = document.getElementById('sched-next-exec')
+  const todEl = document.getElementById('sched-time-of-day')
+  if (!nextEl || !todEl) return
+
+  const dtLocal = String(nextEl.value || '').trim() // "YYYY-MM-DDTHH:mm"
+  if (!dtLocal) {
+    todEl.value = ''
+    return
+  }
+  const hhmm = dtLocal.slice(11, 16)
+  if (!/^\d{2}:\d{2}$/.test(hhmm)) return
+
+  schedSyncing = true
+  try {
+    todEl.value = hhmm
+    todEl.dispatchEvent(new Event('change', { bubbles: true }))
+  } finally {
+    schedSyncing = false
+  }
+}
+
+function syncNextExecFromPreferredTime () {
+  if (schedSyncing) return
+  const nextEl = document.getElementById('sched-next-exec')
+  const todEl = document.getElementById('sched-time-of-day')
+  if (!nextEl || !todEl) return
+
+  const hhmm = String(todEl.value || '').trim()
+  if (!hhmm) return
+
+  const tz = getScheduleTimeZone()
+  const nextUtcSql = computeNextExecAtFromTimeOfDay(hhmm, tz)
+  if (!nextUtcSql) return
+
+  const dtLocal = sqlUtcToSchedDtLocal(nextUtcSql, tz)
+  if (!dtLocal) return
+
+  schedSyncing = true
+  try {
+    nextEl.value = dtLocal
+    setNextExecAutoManaged(true)
+    nextEl.dispatchEvent(new Event('change', { bubbles: true }))
+  } finally {
+    schedSyncing = false
+  }
+}
+
+function handleTimeZoneChanged () {
+  if (isNextExecAutoManaged()) {
+    syncNextExecFromPreferredTime()
+  } else {
+    syncPreferredTimeFromNextExec()
+  }
+}
+
+// ---------- Messages ----------
 function setMsg (text) {
   const ok = document.getElementById('rules-message')
   const er = document.getElementById('rules-error')
@@ -487,11 +594,10 @@ function buildWhereFromForm () {
     .map(v => parseInt(v, 10))
     .filter(n => Number.isFinite(n) && n > 0)
 
-  if (listIds.length === 1) {
+  if (listIds.length === 1)
     rules.push({ field: 'list_id', op: '=', value: listIds[0] })
-  } else if (listIds.length > 1) {
+  else if (listIds.length > 1)
     rules.push({ field: 'list_id', op: 'IN', value: listIds })
-  }
 
   // status (multi)
   const statuses = readMultiSelectValues('from-status')
@@ -525,12 +631,13 @@ function buildWhereFromForm () {
   ).trim()
   if (daysLastCallRaw !== '') {
     const n = parseInt(daysLastCallRaw, 10)
-    if (!isNaN(n) && n >= 0)
+    if (!isNaN(n) && n >= 0) {
       rules.push({
         field: 'last_local_call_time',
         op: 'OLDER_THAN_DAYS',
         value: n
       })
+    }
   }
 
   // phone contains
@@ -544,7 +651,6 @@ function buildWhereFromForm () {
   const ccOp = (document.getElementById('cc-op')?.value || '').trim()
   const ccV1 = (document.getElementById('cc-v1')?.value || '').trim()
   const ccV2 = (document.getElementById('cc-v2')?.value || '').trim()
-
   if (ccOp) {
     const norm1 = ccOp === 'IN' ? ccV1 : ccV1 !== '' ? Number(ccV1) : ''
     const norm2 = ccV2 !== '' ? Number(ccV2) : ''
@@ -612,7 +718,6 @@ function buildActionsFromForm () {
   }
   if (toStatus) actions.update_status = toStatus
   if (reset) actions.reset_called_since_last_reset = true
-
   return actions
 }
 
@@ -649,7 +754,7 @@ function refreshBuilderHints () {
   }
 }
 
-// Hook change events once
+// Hook change events once (but ALSO bind schedule-sync events explicitly)
 let modalEventsBound = false
 function bindModalEvents () {
   if (modalEventsBound) return
@@ -660,6 +765,7 @@ function bindModalEvents () {
     'sched-interval-minutes',
     'sched-next-exec',
     'sched-time-of-day',
+    'sched-timezone',
     'sched-batch-size',
     'sched-max-to-update',
     'from-match-mode',
@@ -680,7 +786,8 @@ function bindModalEvents () {
     'lc-v2',
     'to-list-id',
     'to-status',
-    'to-reset-called'
+    'to-reset-called',
+    'toggle-advanced'
   ]
 
   ids.forEach(id => {
@@ -689,6 +796,42 @@ function bindModalEvents () {
     el.addEventListener('input', refreshBuilderHints)
     el.addEventListener('change', refreshBuilderHints)
   })
+
+  // Schedule sync listeners (these were the part that often ends up "not updating")
+  const nextEl = document.getElementById('sched-next-exec')
+  const todEl = document.getElementById('sched-time-of-day')
+  const tzEl = document.getElementById('sched-timezone')
+
+  if (nextEl) {
+    const onUserEditNext = () => {
+      if (schedSyncing) return
+      setNextExecAutoManaged(false)
+      syncPreferredTimeFromNextExec()
+      refreshBuilderHints()
+    }
+    nextEl.addEventListener('input', onUserEditNext)
+    nextEl.addEventListener('change', onUserEditNext)
+    nextEl.addEventListener('blur', onUserEditNext) // catches manual typing in some browsers
+  }
+
+  if (todEl) {
+    const onUserEditTod = () => {
+      if (schedSyncing) return
+      setNextExecAutoManaged(true)
+      syncNextExecFromPreferredTime()
+      refreshBuilderHints()
+    }
+    todEl.addEventListener('input', onUserEditTod)
+    todEl.addEventListener('change', onUserEditTod)
+    todEl.addEventListener('blur', onUserEditTod)
+  }
+
+  if (tzEl) {
+    tzEl.addEventListener('change', () => {
+      handleTimeZoneChanged()
+      refreshBuilderHints()
+    })
+  }
 }
 
 // ---------- Modal CRUD ----------
@@ -710,7 +853,9 @@ async function openCreateRule () {
   setValue('sched-interval-minutes', '')
   setValue('sched-next-exec', '')
   setValue('sched-time-of-day', '')
-  setValue('sched-timezone', getBrowserTimeZone())
+  setSelectValueSafe('sched-timezone', getBrowserTimeZone())
+  setNextExecAutoManaged(false)
+
   // default blank so server can default
   setValue('sched-batch-size', '')
   setValue('sched-max-to-update', '')
@@ -776,9 +921,8 @@ function flattenRules (node, out = []) {
     out.push(node)
     return out
   }
-  if (node.rules && Array.isArray(node.rules)) {
+  if (node.rules && Array.isArray(node.rules))
     node.rules.forEach(r => flattenRules(r, out))
-  }
   return out
 }
 
@@ -787,8 +931,8 @@ function tryExtractBetween (groupNode, field) {
     return null
 
   if (groupNode.op === 'AND' && groupNode.rules.length === 2) {
-    const a = groupNode.rules[0],
-      b = groupNode.rules[1]
+    const a = groupNode.rules[0]
+    const b = groupNode.rules[1]
     if (a?.field === field && b?.field === field) {
       const ops = new Set([a.op, b.op])
       if (ops.has('>=') && ops.has('<=')) {
@@ -800,8 +944,8 @@ function tryExtractBetween (groupNode, field) {
   }
 
   if (groupNode.op === 'OR' && groupNode.rules.length === 2) {
-    const a = groupNode.rules[0],
-      b = groupNode.rules[1]
+    const a = groupNode.rules[0]
+    const b = groupNode.rules[1]
     if (a?.field === field && b?.field === field) {
       const ops = new Set([a.op, b.op])
       if (ops.has('<') && ops.has('>')) {
@@ -821,7 +965,9 @@ function resetBuilderUI () {
   setValue('sched-interval-minutes', '')
   setValue('sched-next-exec', '')
   setValue('sched-time-of-day', '')
-  setValue('sched-timezone', getBrowserTimeZone())
+  setSelectValueSafe('sched-timezone', getBrowserTimeZone())
+  setNextExecAutoManaged(false)
+
   setValue('sched-batch-size', '')
   setValue('sched-max-to-update', '')
 
@@ -875,13 +1021,18 @@ async function openEditRule (id) {
 
     resetBuilderUI()
 
-    // backend returns snake_case
     setValue(
       'sched-interval-minutes',
       rule.interval_minutes != null ? String(rule.interval_minutes) : ''
     )
-    setValue('sched-timezone', String(rule.schedule_tz || getBrowserTimeZone()))
-    setValue('sched-next-exec', sqlUtcToSchedDtLocal(rule.next_exec_at, getScheduleTimeZone()))
+
+    const tz = String(rule.schedule_tz || getBrowserTimeZone())
+    setSelectValueSafe('sched-timezone', tz)
+
+    const dtLocal = sqlUtcToSchedDtLocal(rule.next_exec_at, tz) // "YYYY-MM-DDTHH:mm"
+    setValue('sched-next-exec', dtLocal)
+    setValue('sched-time-of-day', dtLocal ? dtLocal.slice(11, 16) : '')
+
     setValue(
       'sched-batch-size',
       rule.apply_batch_size != null ? String(rule.apply_batch_size) : ''
@@ -890,8 +1041,9 @@ async function openEditRule (id) {
       'sched-max-to-update',
       rule.apply_max_to_update != null ? String(rule.apply_max_to_update) : ''
     )
-    setValue('sched-time-of-day', '')
-  setValue('sched-timezone', getBrowserTimeZone())
+
+    // default: treat it as auto-managed if we have a preferred time derived
+    setNextExecAutoManaged(!!(dtLocal && dtLocal.slice(11, 16)))
 
     if (conditionsObj.sampleLimit != null)
       setValue('sample-limit', String(conditionsObj.sampleLimit))
@@ -901,6 +1053,7 @@ async function openEditRule (id) {
       ? conditionsObj.where.rules
       : []
 
+    // Populate BETWEEN / NOT_BETWEEN
     topRules.forEach(r => {
       const ccBetween = tryExtractBetween(r, 'called_count')
       if (ccBetween) {
@@ -908,12 +1061,14 @@ async function openEditRule (id) {
         setValue('cc-v1', ccBetween.v1 != null ? String(ccBetween.v1) : '')
         setValue('cc-v2', ccBetween.v2 != null ? String(ccBetween.v2) : '')
       }
+
       const edBetween = tryExtractBetween(r, 'entry_date')
       if (edBetween) {
         setValue('ed-op', edBetween.op)
         setValue('ed-v1', sqlToDtLocal(edBetween.v1))
         setValue('ed-v2', sqlToDtLocal(edBetween.v2))
       }
+
       const lcBetween = tryExtractBetween(r, 'last_local_call_time')
       if (lcBetween) {
         setValue('lc-op', lcBetween.op)
@@ -924,6 +1079,44 @@ async function openEditRule (id) {
 
     const flat = []
     topRules.forEach(r => flattenRules(r, flat))
+
+    // Populate SIMPLE compares for cc/ed/lc (only if not already set by BETWEEN)
+    const allowedCcOps = new Set(['=', '!=', '>=', '>', '<=', '<', 'IN'])
+    const allowedDtOps = new Set(['=', '!=', '>=', '>', '<=', '<'])
+    const firstMatch = (field, allowed) =>
+      flat.find(x => x.field === field && allowed.has(String(x.op)))
+
+    // called_count
+    if (!String(document.getElementById('cc-op')?.value || '').trim()) {
+      const n = firstMatch('called_count', allowedCcOps)
+      if (n) {
+        setValue('cc-op', String(n.op || ''))
+        if (String(n.op) === 'IN' && Array.isArray(n.value))
+          setValue('cc-v1', n.value.join(','))
+        else setValue('cc-v1', n.value != null ? String(n.value) : '')
+        setValue('cc-v2', '')
+      }
+    }
+
+    // entry_date
+    if (!String(document.getElementById('ed-op')?.value || '').trim()) {
+      const n = firstMatch('entry_date', allowedDtOps)
+      if (n) {
+        setValue('ed-op', String(n.op || ''))
+        setValue('ed-v1', sqlToDtLocal(n.value))
+        setValue('ed-v2', '')
+      }
+    }
+
+    // last_local_call_time
+    if (!String(document.getElementById('lc-op')?.value || '').trim()) {
+      const n = firstMatch('last_local_call_time', allowedDtOps)
+      if (n) {
+        setValue('lc-op', String(n.op || ''))
+        setValue('lc-v1', sqlToDtLocal(n.value))
+        setValue('lc-v2', '')
+      }
+    }
 
     // list_id
     const listEq = flat.find(x => x.field === 'list_id' && x.op === '=')
@@ -943,7 +1136,7 @@ async function openEditRule (id) {
     if (statusEq) setMultiSelectValues('from-status', [statusEq.value])
     if (statusIn) setMultiSelectValues('from-status', statusIn.value)
 
-    // called_since_last_reset (ENUM: 'N' = not called since reset)
+    // called_since_last_reset
     const csrNeN = flat.find(
       x =>
         x.field === 'called_since_last_reset' &&
@@ -951,7 +1144,10 @@ async function openEditRule (id) {
         String(x.value) === 'N'
     )
     const csrEqN = flat.find(
-      x => x.field === 'called_since_last_reset' && x.op === '=' && String(x.value) === 'N'
+      x =>
+        x.field === 'called_since_last_reset' &&
+        x.op === '=' &&
+        String(x.value) === 'N'
     )
     if (csrNeN) setValue('from-called-since-mode', 'YES')
     else if (csrEqN) setValue('from-called-since-mode', 'NO')
@@ -1017,7 +1213,6 @@ async function saveRule () {
   const advancedOn = !!document.getElementById('toggle-advanced')?.checked
 
   let conditions, actions
-
   if (advancedOn) {
     try {
       conditions = JSON.parse(
@@ -1027,7 +1222,6 @@ async function saveRule () {
       alert('Invalid JSON in Conditions')
       return
     }
-
     try {
       actions = JSON.parse(
         document.getElementById('rule-actions-json')?.value || '{}'
@@ -1091,10 +1285,18 @@ async function saveRule () {
 
   const scheduleTimeZone = getScheduleTimeZone()
 
-  let nextExecAt = nextExecRaw ? schedDtLocalToSqlUtc(nextExecRaw, scheduleTimeZone) : null
-  if (!nextExecAt && timeOfDay) {
+  // Ensure next exec reflects preferred time if we're auto-managing
+  if (timeOfDay && isNextExecAutoManaged()) syncNextExecFromPreferredTime()
+
+  const nextExecRaw2 = (
+    document.getElementById('sched-next-exec')?.value || ''
+  ).trim()
+
+  let nextExecAt = nextExecRaw2
+    ? schedDtLocalToSqlUtc(nextExecRaw2, scheduleTimeZone)
+    : null
+  if (!nextExecAt && timeOfDay)
     nextExecAt = computeNextExecAtFromTimeOfDay(timeOfDay, scheduleTimeZone)
-  }
 
   let applyBatchSize = null
   if (batchRaw !== '') {
@@ -1463,6 +1665,9 @@ document.addEventListener('DOMContentLoaded', async function () {
   updateFromStatusCount()
   updateFromListCount()
   updateBetweenInputsVisibility()
+
+  // Bind once; schedule sync bindings live here too
+  bindModalEvents()
 
   // Prevent jump/auto-scroll behavior for multi selects
   const fromStatusSel = document.getElementById('from-status')
