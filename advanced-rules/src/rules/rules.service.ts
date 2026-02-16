@@ -102,6 +102,8 @@ export class RulesService {
         ? JSON.parse(rule.actions_json)
         : rule.actions_json;
 
+    console.log(rule, 'schedule_tz in findOne');
+
     return {
       id: rule.id,
       name: rule.name,
@@ -170,7 +172,9 @@ export class RulesService {
       );
     }
 
-    const result = await this.db.query(
+    console.log(scheduleTimeZone, 'scheduleTimeZone in update');
+
+    await this.db.query(
       `UPDATE lead_rules
    SET name=?, description=?, is_active=?, conditions_json=?, actions_json=?,
        interval_minutes=?, next_exec_at=?, schedule_tz=?, apply_batch_size=?, apply_max_to_update=?
@@ -190,7 +194,7 @@ export class RulesService {
       ],
     );
 
-    return { ok: true, result };
+    return { ok: true };
   }
 
   async remove(id: number) {
