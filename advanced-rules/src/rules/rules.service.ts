@@ -118,16 +118,6 @@ WHERE id = ?`,
     const rule = (rows as any[])[0];
     if (!rule) throw new NotFoundException('Rule not found');
 
-    console.log(
-      '[findOne] typeof next_exec_at:',
-      typeof rule.next_exec_at,
-      rule.next_exec_at,
-    );
-    console.log(
-      '[findOne] typeof created_at:',
-      typeof rule.created_at,
-      rule.created_at,
-    );
     const conditions =
       typeof rule.conditions_json === 'string'
         ? JSON.parse(rule.conditions_json)
