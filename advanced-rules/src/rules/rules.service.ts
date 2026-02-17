@@ -9,6 +9,7 @@ import {
   PROTECTED_LISTS,
   PROTECTED_STATUSES,
 } from 'src/common/rules/rule-contants/rule-constants';
+
 @Injectable()
 export class RulesService {
   private toSqlUtc(date: Date): string {
@@ -38,24 +39,24 @@ export class RulesService {
   async create(dto: CreateRuleDto) {
     const interval = dto.intervalMinutes ?? null;
 
-    // nextExecAt can be a one-time run even if interval is null (allowed),
-    // BUT if interval is set and nextExecAt is missing, we MUST set a default.
-    const scheduleTimeZone = (dto as any).scheduleTimeZone ?? null;
+    // NOTE: DTO may not allow this yet; safe access.
+    const scheduleTimeZone: string | null =
+      (dto as any).scheduleTimeZone ?? null;
 
     let nextExecAt: string | null = dto.nextExecAt
-      ? String(dto.nextExecAt)
+      ? String(dto.nextExecAt).trim()
       : null;
 
-    // If interval set and nextExecAt missing, default to now + interval (UTC)
+    // If interval set and nextExecAt missing, default to now + interval (UTC string)
     if (interval != null && !nextExecAt) {
       nextExecAt = this.toSqlUtc(new Date(Date.now() + interval * 60_000));
     }
 
     const [res] = await this.db.query(
       `INSERT INTO lead_rules
-    (name, description, is_active, conditions_json, actions_json,
-     interval_minutes, next_exec_at, schedule_tz, apply_batch_size, apply_max_to_update)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (name, description, is_active, conditions_json, actions_json,
+         interval_minutes, next_exec_at, schedule_tz, apply_batch_size, apply_max_to_update)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         dto.name,
         dto.description ?? null,
@@ -74,21 +75,40 @@ export class RulesService {
   }
 
   async findAll() {
+    // Force next_exec_at to return as STRING (prevents timezone shifts)
     const [rows] = await this.db.query(
-      `SELECT id, name, description, is_active, created_at, updated_at,
-            interval_minutes, next_exec_at, schedule_tz, apply_batch_size, apply_max_to_update,
-            last_run_at
-     FROM lead_rules
-     ORDER BY id DESC`,
+      `SELECT
+          id, name, description, is_active,
+          created_at, updated_at,
+          interval_minutes,
+          DATE_FORMAT(next_exec_at, '%Y-%m-%d %H:%i:%s') AS next_exec_at,
+          schedule_tz,
+          apply_batch_size, apply_max_to_update,
+          last_run_at
+       FROM lead_rules
+       ORDER BY id DESC`,
     );
     return rows;
   }
 
   async findOne(id: number) {
+    // Avoid SELECT * so next_exec_at is never returned as JS Date
     const [rows] = await this.db.query(
-      `SELECT * FROM lead_rules WHERE id = ?`,
+      `SELECT
+          id, name, description, is_active,
+          created_at, updated_at,
+          interval_minutes,
+          DATE_FORMAT(next_exec_at, '%Y-%m-%d %H:%i:%s') AS next_exec_at,
+          schedule_tz,
+          apply_batch_size, apply_max_to_update,
+          last_run_at,
+          conditions_json, actions_json,
+          locked_at, locked_by
+       FROM lead_rules
+       WHERE id = ?`,
       [id],
     );
+
     const rule = (rows as any[])[0];
     if (!rule) throw new NotFoundException('Rule not found');
 
@@ -102,8 +122,6 @@ export class RulesService {
         ? JSON.parse(rule.actions_json)
         : rule.actions_json;
 
-    console.log(rule, 'schedule_tz in findOne');
-
     return {
       id: rule.id,
       name: rule.name,
@@ -112,11 +130,13 @@ export class RulesService {
       created_at: rule.created_at,
       updated_at: rule.updated_at,
       interval_minutes: rule.interval_minutes,
-      next_exec_at: rule.next_exec_at,
+      next_exec_at: rule.next_exec_at, // ✅ string "YYYY-MM-DD HH:MM:SS" or null
       schedule_tz: rule.schedule_tz,
       apply_batch_size: rule.apply_batch_size,
       apply_max_to_update: rule.apply_max_to_update,
       last_run_at: rule.last_run_at,
+      locked_at: rule.locked_at,
+      locked_by: rule.locked_by,
       conditions,
       actions,
     };
@@ -137,15 +157,19 @@ export class RulesService {
         ? dto.intervalMinutes
         : existing.interval_minutes;
 
-    const scheduleTimeZone = (dto as any).scheduleTimeZone ?? undefined;
+    // Preserve existing schedule_tz if dto doesn't provide one
+    const scheduleTimeZone: string | null =
+      (dto as any).scheduleTimeZone !== undefined
+        ? (dto as any).scheduleTimeZone
+        : ((existing as any).schedule_tz ?? null);
 
-    // Use let so we can apply scheduler defaults below
+    // Preserve existing next_exec_at unless explicitly provided
     let nextExecAt: string | null =
       dto.nextExecAt !== undefined
         ? dto.nextExecAt != null
-          ? String(dto.nextExecAt)
+          ? String(dto.nextExecAt).trim()
           : null
-        : existing.next_exec_at;
+        : ((existing as any).next_exec_at ?? null);
 
     const applyBatchSize =
       dto.applyBatchSize !== undefined
@@ -157,28 +181,25 @@ export class RulesService {
         ? dto.applyMaxToUpdate
         : existing.apply_max_to_update;
 
-    // -----------------------------
-    // Scheduling fixes:
-    // 1) If interval disabled -> also disable next exec
-    // 2) causing "interval doesn't work" (scheduler requires next_exec_at NOT NULL)
-    // -----------------------------
+    // Scheduling rules:
+    // - If interval disabled -> also disable next exec
     if (intervalMinutes == null) {
       nextExecAt = null;
     }
 
+    // - If interval enabled but nextExecAt missing -> default now + interval (UTC string)
     if (intervalMinutes != null && !nextExecAt) {
       nextExecAt = this.toSqlUtc(
         new Date(Date.now() + Number(intervalMinutes) * 60_000),
       );
     }
 
-    console.log(scheduleTimeZone, 'scheduleTimeZone in update');
-
     await this.db.query(
       `UPDATE lead_rules
-   SET name=?, description=?, is_active=?, conditions_json=?, actions_json=?,
-       interval_minutes=?, next_exec_at=?, schedule_tz=?, apply_batch_size=?, apply_max_to_update=?
-   WHERE id=?`,
+       SET name=?, description=?, is_active=?, conditions_json=?, actions_json=?,
+           interval_minutes=?, next_exec_at=?, schedule_tz=?,
+           apply_batch_size=?, apply_max_to_update=?
+       WHERE id=?`,
       [
         name,
         description,
@@ -187,7 +208,7 @@ export class RulesService {
         JSON.stringify(actions),
         intervalMinutes,
         nextExecAt,
-        scheduleTimeZone ?? null,
+        scheduleTimeZone,
         applyBatchSize,
         applyMaxToUpdate,
         id,
@@ -198,11 +219,7 @@ export class RulesService {
   }
 
   async remove(id: number) {
-    await this.db.query(
-      `DELETE FROM lead_rules
-       WHERE id = ?`,
-      [id],
-    );
+    await this.db.query(`DELETE FROM lead_rules WHERE id = ?`, [id]);
     return { ok: true };
   }
 
@@ -247,8 +264,6 @@ export class RulesService {
     ruleId: number,
     apply: { batchSize: number; maxToUpdate: number },
   ) {
-    // Prevent concurrent APPLY runs for the same rule from overlapping.
-    // Advisory DB locks work even when target tables are MyISAM.
     const lockName = `lead_rule_apply_${ruleId}`;
 
     if (process.env.ALLOW_RULE_UPDATES !== 'true') {
@@ -266,12 +281,14 @@ export class RulesService {
     }
 
     const conditionsRaw =
-      typeof rule.conditions === 'string'
-        ? JSON.parse(rule.conditions)
-        : rule.conditions;
+      typeof (rule as any).conditions === 'string'
+        ? JSON.parse((rule as any).conditions)
+        : (rule as any).conditions;
 
     const actions = (
-      typeof rule.actions === 'string' ? JSON.parse(rule.actions) : rule.actions
+      typeof (rule as any).actions === 'string'
+        ? JSON.parse((rule as any).actions)
+        : (rule as any).actions
     ) as ActionSpec;
 
     const targetListId = actions.move_to_list;
@@ -300,7 +317,6 @@ export class RulesService {
       };
     }
 
-    // 🔒 Require a successful dry-run in last 30 minutes
     const [dryRows] = await this.db.query(
       `SELECT id, created_at
        FROM lead_rule_runs
@@ -320,8 +336,6 @@ export class RulesService {
       };
     }
 
-    // Prevent multiple APPLY runs for the same rule from overlapping.
-    // (e.g., double-clicks, retries, parallel workers)
     let gotLock = false;
     const [lockRows] = await this.db.query(
       `SELECT GET_LOCK(?, 0) AS got_lock`,
@@ -336,7 +350,6 @@ export class RulesService {
       };
     }
 
-    // Create APPLY run row with STARTED status
     const [runRes] = await this.db.query(
       `INSERT INTO lead_rule_runs
          (rule_id, run_type, matched_count, updated_count, status, sample_json, started_at)
@@ -347,7 +360,6 @@ export class RulesService {
     const runId = (runRes as any).insertId;
 
     try {
-      // Build WHERE from DSL
       const { sql: baseWhereSql, params } = this.qb.buildWhere(
         conditionSpec.where,
       );
@@ -362,7 +374,6 @@ export class RulesService {
           ? ` AND vicidial_list.status NOT IN (${PROTECTED_STATUSES.map(() => '?').join(',')})`
           : '';
 
-      // Safety: refuse to run without a WHERE clause from DSL
       if (!baseWhereSql || !baseWhereSql.trim()) {
         await this.db.query(
           `UPDATE lead_rule_runs
@@ -374,10 +385,10 @@ export class RulesService {
       }
 
       const whereSql = `
-  ${baseWhereSql}
-  ${protectedListClause}
-  ${protectedStatusClause}
-`;
+        ${baseWhereSql}
+        ${protectedListClause}
+        ${protectedStatusClause}
+      `;
 
       const finalParams = [
         ...params,
@@ -385,7 +396,6 @@ export class RulesService {
         ...PROTECTED_STATUSES,
       ];
 
-      // Count matches
       const [countRows] = await this.db.query(
         `SELECT COUNT(*) AS c
          FROM vicidial_list
@@ -397,7 +407,6 @@ export class RulesService {
       const toUpdate = Math.min(matchedCount, maxToUpdate);
       let updatedTotal = 0;
 
-      // Fetch a sample of leads BEFORE updating, for logging
       const [sampleRows] = await this.db.query(
         `SELECT lead_id, list_id, status, phone_number
          FROM vicidial_list
@@ -407,14 +416,12 @@ export class RulesService {
         finalParams,
       );
 
-      // Cursor-based batching (prevents re-updating same rows)
       let lastLeadId = 0;
 
       while (updatedTotal < toUpdate) {
         const remaining = toUpdate - updatedTotal;
         const currentBatch = Math.min(batchSize, remaining);
 
-        // 1) Select deterministic next ids
         const selectSql = `
           SELECT vicidial_list.lead_id
           FROM vicidial_list
@@ -438,7 +445,6 @@ export class RulesService {
 
         lastLeadId = ids[ids.length - 1];
 
-        // 2) Build SET
         const set: string[] = [];
         const updParams: any[] = [];
 
@@ -451,14 +457,12 @@ export class RulesService {
           updParams.push(targetStatus);
         }
         if (resetCalled) {
-          // enum('Y','N','Y1'...'D') - reset is 'N'
           set.push(`called_since_last_reset = ?`);
           updParams.push('N');
         }
 
         set.push(`modify_date = NOW()`);
 
-        // 3) Update only those ids
         const ph = ids.map(() => '?').join(',');
         const updateSql = `
           UPDATE vicidial_list
@@ -474,7 +478,6 @@ export class RulesService {
         updatedTotal += Math.min(affected, toUpdate - updatedTotal);
       }
 
-      // Mark run as SUCCESS
       await this.db.query(
         `UPDATE lead_rule_runs
          SET matched_count = ?, updated_count = ?, status = 'SUCCESS',
@@ -496,7 +499,6 @@ export class RulesService {
         },
       };
     } catch (e: any) {
-      // Mark run as FAILED
       await this.db.query(
         `UPDATE lead_rule_runs
          SET status = 'FAILED', error_text = ?, ended_at = NOW()
@@ -509,7 +511,7 @@ export class RulesService {
         try {
           await this.db.query(`SELECT RELEASE_LOCK(?) AS released`, [lockName]);
         } catch {
-          // ignore lock release errors
+          // ignore
         }
       }
     }
@@ -519,17 +521,17 @@ export class RulesService {
     if (campaignId && campaignId.trim()) {
       const [rows] = await this.db.query(
         `
-      SELECT DISTINCT status, status_name
-      FROM (
-        SELECT status, status_name
-        FROM vicidial_statuses
-        UNION ALL
-        SELECT status, status_name
-        FROM vicidial_campaign_statuses
-        WHERE campaign_id = ?
-      ) s
-      ORDER BY status
-      `,
+        SELECT DISTINCT status, status_name
+        FROM (
+          SELECT status, status_name
+          FROM vicidial_statuses
+          UNION ALL
+          SELECT status, status_name
+          FROM vicidial_campaign_statuses
+          WHERE campaign_id = ?
+        ) s
+        ORDER BY status
+        `,
         [campaignId.trim()],
       );
       return rows;
@@ -537,19 +539,19 @@ export class RulesService {
 
     const [rows] = await this.db.query(
       `
-    SELECT DISTINCT status, status_name
-    FROM (
-      SELECT status, status_name FROM vicidial_statuses
-      UNION ALL
-      SELECT status, status_name FROM vicidial_campaign_statuses
-    ) s
-    ORDER BY status
-    `,
+      SELECT DISTINCT status, status_name
+      FROM (
+        SELECT status, status_name FROM vicidial_statuses
+        UNION ALL
+        SELECT status, status_name FROM vicidial_campaign_statuses
+      ) s
+      ORDER BY status
+      `,
     );
     return rows;
   }
+
   async cloneRule(ruleId: number, requestedName?: string) {
-    // Pull raw DB row so we can copy fields without any mapping surprises
     const [rows] = await this.db.query(
       `SELECT * FROM lead_rules WHERE id = ?`,
       [ruleId],
@@ -561,42 +563,36 @@ export class RulesService {
       (requestedName && requestedName.trim()) ||
       `${src.name ?? 'Untitled Rule'} (Copy)`;
 
-    // Ensure unique name
     const uniqueName = await this.makeUniqueRuleName(baseName);
 
-    // Decide what to copy vs reset
     const description = src.description ?? null;
-
-    // keep as stored (already JSON text in DB)
     const conditionsJson =
       src.conditions_json ??
       JSON.stringify({ where: { op: 'AND', rules: [] } });
     const actionsJson = src.actions_json ?? JSON.stringify({});
 
-    // Copy scheduling limits (your call)
     const intervalMinutes = src.interval_minutes ?? null;
     const applyBatchSize = src.apply_batch_size ?? null;
     const applyMaxToUpdate = src.apply_max_to_update ?? null;
 
-    // Reset run/lock state
+    const scheduleTz = src.schedule_tz ?? null; // ✅ copy tz
     const nextExecAt = null;
-    // last_run_at exists in table; not in your INSERT list currently, so stays NULL by default
-    // locked_at/locked_by also not in INSERT list, so NULL by default
 
     const [res] = await this.db.query(
       `INSERT INTO lead_rules
-      (name, description, is_active, conditions_json, actions_json,
-       interval_minutes, next_exec_at, apply_batch_size, apply_max_to_update,
-       last_run_at, locked_at, locked_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+        (name, description, is_active, conditions_json, actions_json,
+         interval_minutes, next_exec_at, schedule_tz, apply_batch_size, apply_max_to_update,
+         last_run_at, locked_at, locked_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
       [
         uniqueName,
         description,
-        0, // force inactive
+        0,
         conditionsJson,
         actionsJson,
         intervalMinutes,
         nextExecAt,
+        scheduleTz,
         applyBatchSize,
         applyMaxToUpdate,
       ],
@@ -605,27 +601,19 @@ export class RulesService {
     return { id: (res as any).insertId };
   }
 
-  /**
-   * Makes sure the cloned rule name doesn't collide.
-   * Example:
-   *   "Rule (Copy)" -> if exists, try "Rule (Copy 2)", "Rule (Copy 3)"...
-   */
   private async makeUniqueRuleName(baseName: string) {
     const trimmed = baseName.trim();
     if (!trimmed) return 'Cloned Rule';
 
-    // quick check if available
     const exists = await this.ruleNameExists(trimmed);
     if (!exists) return trimmed;
 
-    // If "X (Copy)" already exists, append increment
     for (let i = 2; i <= 50; i++) {
       const candidate = `${trimmed} ${i}`.replace(/\s+/g, ' ').trim();
       const used = await this.ruleNameExists(candidate);
       if (!used) return candidate;
     }
 
-    // Fallback: timestamp suffix
     return `${trimmed} ${Date.now()}`;
   }
 

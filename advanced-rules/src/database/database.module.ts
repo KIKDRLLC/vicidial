@@ -33,6 +33,9 @@ import { createPool } from 'mysql2/promise';
           // ✅ keep connections stable
           enableKeepAlive: true,
           keepAliveInitialDelay: 0,
+
+          timezone: 'Z', // interpret as UTC
+          dateStrings: true, // return DATETIME/TIMESTAMP as strings, not JS Date
         });
 
         // ✅ fail fast if DB unreachable
