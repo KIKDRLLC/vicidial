@@ -78,15 +78,16 @@ export class RulesService {
     // Force next_exec_at to return as STRING (prevents timezone shifts)
     const [rows] = await this.db.query(
       `SELECT
-          id, name, description, is_active,
-          created_at, updated_at,
-          interval_minutes,
-          DATE_FORMAT(next_exec_at, '%Y-%m-%d %H:%i:%s') AS next_exec_at,
-          schedule_tz,
-          apply_batch_size, apply_max_to_update,
-          last_run_at
-       FROM lead_rules
-       ORDER BY id DESC`,
+  id, name, description, is_active,
+  DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+  DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+  interval_minutes,
+  DATE_FORMAT(next_exec_at, '%Y-%m-%d %H:%i:%s') AS next_exec_at,
+  schedule_tz,
+  apply_batch_size, apply_max_to_update,
+  DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at
+FROM lead_rules
+ORDER BY id DESC`,
     );
     return rows;
   }

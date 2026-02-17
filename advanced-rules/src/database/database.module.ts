@@ -34,12 +34,22 @@ import { createPool } from 'mysql2/promise';
           enableKeepAlive: true,
           keepAliveInitialDelay: 0,
 
-          timezone: 'Z', // interpret as UTC
-          dateStrings: true, // return DATETIME/TIMESTAMP as strings, not JS Date
+          // ✅ TIMEZONE / DATETIME SAFETY
+          timezone: 'Z', // driver treats dates as UTC
+          dateStrings: ['DATE', 'DATETIME', 'TIMESTAMP'], // return these as strings (not JS Date)
         });
 
         // ✅ fail fast if DB unreachable
         await pool.query('SELECT 1');
+
+        // ✅ enforce session timezone for all pooled connections
+        // (prevents surprises from MySQL global/session tz differences)
+        const conn = await pool.getConnection();
+        try {
+          await conn.query("SET time_zone = '+00:00'");
+        } finally {
+          conn.release();
+        }
 
         return pool;
       },
